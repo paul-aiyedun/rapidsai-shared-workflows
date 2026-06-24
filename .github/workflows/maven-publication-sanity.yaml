@@ -1,0 +1,124 @@
+name: Validate Maven publication
+
+on:
+  workflow_call:
+    inputs:
+      repository_url:
+        description: "Maven repository URL to test."
+        required: true
+        type: string
+      maven_group_id:
+        description: "Maven group ID."
+        required: true
+        type: string
+      artifact_id:
+        description: "Maven artifact ID."
+        required: true
+        type: string
+      version:
+        description: "Maven artifact version."
+        required: true
+        type: string
+      classifier_matrix:
+        description: "JSON array of classifiers to resolve. Use [] when there are no classifiers."
+        required: false
+        type: string
+        default: "[]"
+      packaging:
+        description: "Artifact packaging extension."
+        required: false
+        type: string
+        default: "jar"
+      java_version:
+        description: "Java version expected by callers. Recorded in logs for auditability."
+        required: false
+        type: string
+        default: "17"
+      dry_run:
+        description: "Print URLs that would be resolved without contacting the repository."
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      MAVEN_REPOSITORY_USERNAME:
+        description: "Optional Maven repository username."
+        required: false
+      MAVEN_REPOSITORY_PASSWORD:
+        description: "Optional Maven repository password or token."
+        required: false
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  actions: read
+  checks: none
+  contents: read
+  deployments: none
+  discussions: none
+  id-token: write
+  issues: none
+  packages: read
+  pages: none
+  pull-requests: read
+  repository-projects: none
+  security-events: none
+  statuses: none
+
+jobs:
+  sanity:
+    name: resolve Maven artifacts
+    runs-on: linux-amd64-cpu4
+    container:
+      image: rapidsai/ci-conda:26.08-latest # zizmor: ignore[unpinned-images]
+    steps:
+      - name: Resolve expected Maven artifacts
+        env:
+          REPOSITORY_URL: ${{ inputs.repository_url }}
+          GROUP_ID: ${{ inputs.maven_group_id }}
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          VERSION: ${{ inputs.version }}
+          CLASSIFIER_MATRIX: ${{ inputs.classifier_matrix }}
+          PACKAGING: ${{ inputs.packaging }}
+          JAVA_VERSION: ${{ inputs.java_version }}
+          MAVEN_REPOSITORY_USERNAME: ${{ secrets.MAVEN_REPOSITORY_USERNAME }}
+          MAVEN_REPOSITORY_PASSWORD: ${{ secrets.MAVEN_REPOSITORY_PASSWORD }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          if ! jq -e 'type == "array"' <<<"${CLASSIFIER_MATRIX}" >/dev/null; then
+            echo "::error::classifier_matrix must be a JSON array"
+            exit 1
+          fi
+
+          echo "Testing Maven publication with Java ${JAVA_VERSION}"
+
+          group_path="${GROUP_ID//./\/}"
+          base_url="${REPOSITORY_URL%/}/${group_path}/${ARTIFACT_ID}/${VERSION}"
+          base_name="${ARTIFACT_ID}-${VERSION}"
+
+          urls=(
+            "${base_url}/${base_name}.pom"
+            "${base_url}/${base_name}.${PACKAGING}"
+          )
+
+          while IFS= read -r classifier; do
+            [[ -z "${classifier}" ]] && continue
+            urls+=("${base_url}/${base_name}-${classifier}.${PACKAGING}")
+          done < <(jq -r '.[]' <<<"${CLASSIFIER_MATRIX}")
+
+          auth_args=()
+          if [[ -n "${MAVEN_REPOSITORY_USERNAME}" || -n "${MAVEN_REPOSITORY_PASSWORD}" ]]; then
+            auth_args=(--user "${MAVEN_REPOSITORY_USERNAME}:${MAVEN_REPOSITORY_PASSWORD}")
+          fi
+
+          for url in "${urls[@]}"; do
+            if [[ "${DRY_RUN}" == "true" ]]; then
+              echo "DRY RUN: resolve ${url}"
+            else
+              echo "Resolving ${url}"
+              curl --fail --show-error --silent --location --range 0-0 --output /dev/null "${auth_args[@]}" "${url}"
+            fi
+          done

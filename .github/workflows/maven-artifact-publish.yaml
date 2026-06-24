@@ -1,0 +1,258 @@
+name: Publish Maven artifacts
+
+on:
+  workflow_call:
+    inputs:
+      build_type:
+        description: "One of: [branch, nightly, release]. Pull-request builds are rejected."
+        required: true
+        type: string
+      artifact_directory:
+        description: "Directory containing Maven repository-layout artifacts to publish."
+        required: true
+        type: string
+      artifactory_url:
+        description: "Base Artifactory URL, for example https://artifactory.example.com/artifactory."
+        required: true
+        type: string
+      artifactory_repository:
+        description: "Artifactory Maven repository name."
+        required: true
+        type: string
+      maven_group_id:
+        description: "Expected Maven group ID, for example ai.rapids."
+        required: true
+        type: string
+      artifact_id:
+        description: "Expected Maven artifact ID, for example cudf."
+        required: true
+        type: string
+      version:
+        description: "Expected Maven artifact version."
+        required: true
+        type: string
+      expected_classifiers:
+        description: "JSON array of expected classifier suffixes. Use [] when there are no classifiers."
+        required: false
+        type: string
+        default: "[]"
+      publish_to_sonatype_snapshots:
+        description: "Whether to also publish nightly artifacts to Sonatype snapshots."
+        required: false
+        type: boolean
+        default: false
+      sonatype_snapshots_url:
+        description: "Base Sonatype snapshots deployment URL."
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        description: "Validate inputs and print upload operations without publishing."
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      ARTIFACTORY_USERNAME:
+        description: "Artifactory username."
+        required: false
+      ARTIFACTORY_TOKEN:
+        description: "Artifactory token or password."
+        required: false
+      SONATYPE_SNAPSHOTS_USERNAME:
+        description: "Sonatype snapshots username."
+        required: false
+      SONATYPE_SNAPSHOTS_PASSWORD:
+        description: "Sonatype snapshots password or token."
+        required: false
+    outputs:
+      artifactory_repository_url:
+        description: "Resolved Artifactory Maven repository URL."
+        value: ${{ jobs.publish.outputs.artifactory_repository_url }}
+      sonatype_snapshots_url:
+        description: "Sonatype snapshots URL used by this run, if enabled."
+        value: ${{ jobs.publish.outputs.sonatype_snapshots_url }}
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  actions: read
+  checks: none
+  contents: read
+  deployments: none
+  discussions: none
+  id-token: write
+  issues: none
+  packages: read
+  pages: none
+  pull-requests: read
+  repository-projects: none
+  security-events: none
+  statuses: none
+
+jobs:
+  publish:
+    name: publish Maven artifacts
+    runs-on: linux-amd64-cpu4
+    container:
+      image: rapidsai/ci-conda:26.08-latest # zizmor: ignore[unpinned-images]
+      env:
+        RAPIDS_BUILD_TYPE: ${{ inputs.build_type }}
+    outputs:
+      artifactory_repository_url: ${{ steps.set_outputs.outputs.artifactory_repository_url }}
+      sonatype_snapshots_url: ${{ steps.set_outputs.outputs.sonatype_snapshots_url }}
+    steps:
+      - name: Validate publish request
+        env:
+          BUILD_TYPE: ${{ inputs.build_type }}
+          ARTIFACT_DIR: ${{ inputs.artifact_directory }}
+          GROUP_ID: ${{ inputs.maven_group_id }}
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          VERSION: ${{ inputs.version }}
+          EXPECTED_CLASSIFIERS: ${{ inputs.expected_classifiers }}
+          PUBLISH_TO_SONATYPE_SNAPSHOTS: ${{ inputs.publish_to_sonatype_snapshots }}
+          SONATYPE_SNAPSHOTS_URL: ${{ inputs.sonatype_snapshots_url }}
+        run: |
+          set -euo pipefail
+
+          case "${BUILD_TYPE}" in
+            branch|nightly|release) ;;
+            pull-request)
+              echo "::error::pull-request builds must not publish Maven artifacts"
+              exit 1
+              ;;
+            *)
+              echo "::error::Unsupported build_type '${BUILD_TYPE}'"
+              exit 1
+              ;;
+          esac
+
+          if [[ ! -d "${ARTIFACT_DIR}" ]]; then
+            echo "::error::artifact_directory '${ARTIFACT_DIR}' does not exist"
+            exit 1
+          fi
+
+          if ! jq -e 'type == "array"' <<<"${EXPECTED_CLASSIFIERS}" >/dev/null; then
+            echo "::error::expected_classifiers must be a JSON array"
+            exit 1
+          fi
+
+          if [[ "${BUILD_TYPE}" == "release" && "${VERSION}" == *SNAPSHOT* ]]; then
+            echo "::error::release builds must not publish SNAPSHOT versions"
+            exit 1
+          fi
+
+          if [[ "${BUILD_TYPE}" != "release" && "${VERSION}" != *SNAPSHOT* ]]; then
+            echo "::warning::Non-release build '${BUILD_TYPE}' is publishing non-SNAPSHOT version '${VERSION}'"
+          fi
+
+          if [[ "${PUBLISH_TO_SONATYPE_SNAPSHOTS}" == "true" && "${BUILD_TYPE}" != "nightly" ]]; then
+            echo "::error::publish_to_sonatype_snapshots is only supported for nightly builds"
+            exit 1
+          fi
+
+          if [[ "${PUBLISH_TO_SONATYPE_SNAPSHOTS}" == "true" && -z "${SONATYPE_SNAPSHOTS_URL}" ]]; then
+            echo "::error::sonatype_snapshots_url is required when publish_to_sonatype_snapshots is true"
+            exit 1
+          fi
+
+          shopt -s globstar nullglob
+          artifacts=("${ARTIFACT_DIR}"/**/*.{jar,pom,asc,md5,sha1,sha256,sha512})
+          if (( ${#artifacts[@]} == 0 )); then
+            echo "::error::No Maven artifacts found under '${ARTIFACT_DIR}'"
+            exit 1
+          fi
+
+          group_path="${GROUP_ID//./\/}"
+          if [[ ! -d "${ARTIFACT_DIR}/${group_path}" ]]; then
+            echo "::error::artifact_directory does not contain expected Maven group path '${group_path}'"
+            exit 1
+          fi
+
+          expected_base="${ARTIFACT_ID}-${VERSION}"
+          if ! find "${ARTIFACT_DIR}" -type f -name "${expected_base}.pom" -print -quit | grep -q .; then
+            echo "::error::Missing expected POM '${expected_base}.pom'"
+            exit 1
+          fi
+
+          while IFS= read -r classifier; do
+            [[ -z "${classifier}" ]] && continue
+            if ! find "${ARTIFACT_DIR}" -type f -name "${expected_base}-${classifier}.jar" -print -quit | grep -q .; then
+              echo "::error::Missing expected classifier artifact '${expected_base}-${classifier}.jar'"
+              exit 1
+            fi
+          done < <(jq -r '.[]' <<<"${EXPECTED_CLASSIFIERS}")
+
+      - name: Publish to Artifactory
+        env:
+          ARTIFACT_DIR: ${{ inputs.artifact_directory }}
+          ARTIFACTORY_URL: ${{ inputs.artifactory_url }}
+          ARTIFACTORY_REPOSITORY: ${{ inputs.artifactory_repository }}
+          ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          repo_url="${ARTIFACTORY_URL%/}/${ARTIFACTORY_REPOSITORY}"
+          echo "Artifactory repository URL: ${repo_url}"
+
+          if [[ "${DRY_RUN}" != "true" && ( -z "${ARTIFACTORY_USERNAME}" || -z "${ARTIFACTORY_TOKEN}" ) ]]; then
+            echo "::error::ARTIFACTORY_USERNAME and ARTIFACTORY_TOKEN are required when dry_run is false"
+            exit 1
+          fi
+
+          while IFS= read -r -d '' file; do
+            rel="${file#${ARTIFACT_DIR}/}"
+            target="${repo_url}/${rel}"
+            if [[ "${DRY_RUN}" == "true" ]]; then
+              echo "DRY RUN: upload '${file}' -> '${target}'"
+            else
+              curl --fail --show-error --silent \
+                --user "${ARTIFACTORY_USERNAME}:${ARTIFACTORY_TOKEN}" \
+                --upload-file "${file}" \
+                "${target}"
+            fi
+          done < <(find "${ARTIFACT_DIR}" -type f -print0)
+
+      - name: Publish nightly snapshots to Sonatype snapshots
+        if: ${{ inputs.publish_to_sonatype_snapshots }}
+        env:
+          ARTIFACT_DIR: ${{ inputs.artifact_directory }}
+          SONATYPE_SNAPSHOTS_URL: ${{ inputs.sonatype_snapshots_url }}
+          SONATYPE_SNAPSHOTS_USERNAME: ${{ secrets.SONATYPE_SNAPSHOTS_USERNAME }}
+          SONATYPE_SNAPSHOTS_PASSWORD: ${{ secrets.SONATYPE_SNAPSHOTS_PASSWORD }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${DRY_RUN}" != "true" && ( -z "${SONATYPE_SNAPSHOTS_USERNAME}" || -z "${SONATYPE_SNAPSHOTS_PASSWORD}" ) ]]; then
+            echo "::error::SONATYPE_SNAPSHOTS_USERNAME and SONATYPE_SNAPSHOTS_PASSWORD are required when dry_run is false"
+            exit 1
+          fi
+
+          while IFS= read -r -d '' file; do
+            rel="${file#${ARTIFACT_DIR}/}"
+            target="${SONATYPE_SNAPSHOTS_URL%/}/${rel}"
+            if [[ "${DRY_RUN}" == "true" ]]; then
+              echo "DRY RUN: upload '${file}' -> '${target}'"
+            else
+              curl --fail --show-error --silent \
+                --user "${SONATYPE_SNAPSHOTS_USERNAME}:${SONATYPE_SNAPSHOTS_PASSWORD}" \
+                --upload-file "${file}" \
+                "${target}"
+            fi
+          done < <(find "${ARTIFACT_DIR}" -type f -print0)
+
+      - name: Set outputs
+        id: set_outputs
+        env:
+          ARTIFACTORY_URL: ${{ inputs.artifactory_url }}
+          ARTIFACTORY_REPOSITORY: ${{ inputs.artifactory_repository }}
+          SONATYPE_SNAPSHOTS_URL: ${{ inputs.publish_to_sonatype_snapshots && inputs.sonatype_snapshots_url || '' }}
+        run: |
+          {
+            echo "artifactory_repository_url=${ARTIFACTORY_URL%/}/${ARTIFACTORY_REPOSITORY}"
+            echo "sonatype_snapshots_url=${SONATYPE_SNAPSHOTS_URL}"
+          } >> "${GITHUB_OUTPUT}"

@@ -1,0 +1,113 @@
+name: Publish Java API docs
+
+on:
+  workflow_call:
+    inputs:
+      docs_directory:
+        description: "Directory containing generated Javadocs."
+        required: true
+        type: string
+      project_name:
+        description: "Project name used in the docs URL, for example cudf."
+        required: true
+        type: string
+      version:
+        description: "RAPIDS or project release version."
+        required: true
+        type: string
+      target_base_path:
+        description: "Base public API docs URL."
+        required: false
+        type: string
+        default: "https://docs.rapids.ai/api"
+      publish_script:
+        description: |
+          Optional shell code that publishes docs_directory. The script receives
+          DOCS_DIRECTORY, PROJECT_NAME, VERSION, TARGET_BASE_PATH, and PUBLISHED_DOCS_URL.
+          If empty and dry_run is false, this workflow fails explicitly because no docs backend is configured.
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        description: "Validate docs and print the target URL without publishing."
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      DOCS_PUBLISH_TOKEN:
+        description: "Optional token used by publish_script."
+        required: false
+    outputs:
+      published_docs_url:
+        description: "Expected Java API docs URL."
+        value: ${{ jobs.publish.outputs.published_docs_url }}
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  actions: read
+  checks: none
+  contents: read
+  deployments: none
+  discussions: none
+  id-token: write
+  issues: none
+  packages: read
+  pages: none
+  pull-requests: read
+  repository-projects: none
+  security-events: none
+  statuses: none
+
+jobs:
+  publish:
+    name: publish Java API docs
+    runs-on: linux-amd64-cpu4
+    container:
+      image: rapidsai/ci-conda:26.08-latest # zizmor: ignore[unpinned-images]
+    outputs:
+      published_docs_url: ${{ steps.docs.outputs.published_docs_url }}
+    steps:
+      - name: Validate and publish Java API docs
+        id: docs
+        env:
+          DOCS_DIRECTORY: ${{ inputs.docs_directory }}
+          PROJECT_NAME: ${{ inputs.project_name }}
+          VERSION: ${{ inputs.version }}
+          TARGET_BASE_PATH: ${{ inputs.target_base_path }}
+          PUBLISH_SCRIPT: ${{ inputs.publish_script }}
+          DOCS_PUBLISH_TOKEN: ${{ secrets.DOCS_PUBLISH_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! -d "${DOCS_DIRECTORY}" ]]; then
+            echo "::error::docs_directory '${DOCS_DIRECTORY}' does not exist"
+            exit 1
+          fi
+
+          if [[ ! -f "${DOCS_DIRECTORY}/index.html" ]]; then
+            echo "::error::docs_directory '${DOCS_DIRECTORY}' does not contain index.html"
+            exit 1
+          fi
+
+          published_docs_url="${TARGET_BASE_PATH%/}/${PROJECT_NAME}/${VERSION}/"
+          echo "published_docs_url=${published_docs_url}" >> "${GITHUB_OUTPUT}"
+
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            echo "DRY RUN: publish '${DOCS_DIRECTORY}' to '${published_docs_url}'"
+            exit 0
+          fi
+
+          if [[ -z "${PUBLISH_SCRIPT}" ]]; then
+            echo "::error::No Java API docs publication backend is configured. Provide publish_script or keep dry_run=true."
+            exit 1
+          fi
+
+          export PUBLISHED_DOCS_URL="${published_docs_url}"
+          bash -euo pipefail -c "${PUBLISH_SCRIPT}"
+
+          echo "Validating published docs URL: ${published_docs_url}"
+          curl --fail --show-error --silent --location --head "${published_docs_url}" >/dev/null

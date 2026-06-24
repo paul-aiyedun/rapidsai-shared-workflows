@@ -96,3 +96,45 @@ wheel-tests:
 ```
 
 Values passed through `secrets:` are redacted everywhere in the GitHub UI, including in logs, and in most cases are replaced with `***`.
+
+### Java/Maven Release Workflows
+
+This repository provides reusable workflows for RAPIDS Java/Maven publication:
+
+* `.github/workflows/maven-artifact-publish.yaml`
+* `.github/workflows/maven-central-publish.yaml`
+* `.github/workflows/maven-publication-sanity.yaml`
+* `.github/workflows/java-api-docs-publish.yaml`
+
+These workflows are intended to keep generic Maven publication logic out of project repositories. Project-specific build logic, classifier matrices, and native-library packaging should remain in the calling repository.
+
+Supported Java/Maven `build_type` values are:
+
+* `pull-request`: validation only. Publication workflows reject this build type.
+* `branch`: publish to an internal RAPIDS Artifactory Maven repository.
+* `nightly`: publish snapshots to the configured snapshot destinations.
+* `release`: stage release artifacts, validate the Central Publisher bundle, promote after caller-controlled approval, publish Java API docs, and run publication sanity checks.
+
+Example Artifactory publish caller:
+
+```yaml
+publish-java-branch:
+  uses: rapidsai/shared-workflows/.github/workflows/maven-artifact-publish.yaml@main
+  with:
+    build_type: branch
+    artifact_directory: java-maven-repository
+    artifactory_url: ${{ vars.RAPIDS_ARTIFACTORY_URL }}
+    artifactory_repository: ${{ vars.RAPIDS_MAVEN_BRANCH_REPOSITORY }}
+    maven_group_id: ai.rapids
+    artifact_id: cudf
+    version: 26.08.0-SNAPSHOT
+    expected_classifiers: '["cuda12-x86_64", "cuda12-aarch64"]'
+    dry_run: true
+  secrets:
+    ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+    ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+```
+
+The Central Publisher workflow validates deployment bundle size before upload. The default limit is `1073741824` bytes (`1GB`), matching the documented Central Publisher upload bundle limit.
+
+The Java API docs workflow validates that generated Javadocs contain `index.html`. If no docs publication backend has been wired through `publish_script`, non-dry-run calls fail explicitly instead of silently preserving a manual publication step.

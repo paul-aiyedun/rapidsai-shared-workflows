@@ -1,0 +1,269 @@
+name: Publish Maven artifacts to Central
+
+on:
+  workflow_call:
+    inputs:
+      artifact_directory:
+        description: "Directory containing Maven repository-layout release artifacts."
+        required: true
+        type: string
+      deployment_bundle:
+        description: "Path to a deployment bundle zip, or empty to create one from artifact_directory."
+        required: false
+        type: string
+        default: ""
+      version:
+        description: "Maven release version."
+        required: true
+        type: string
+      artifact_id:
+        description: "Maven artifact ID."
+        required: true
+        type: string
+      maven_group_id:
+        description: "Maven group ID."
+        required: true
+        type: string
+      wait_for_validation:
+        description: "Whether to wait for Sonatype VALIDATED status."
+        required: false
+        type: boolean
+        default: true
+      promote:
+        description: "Whether to promote the deployment to Maven Central. Callers should protect this job with a GitHub environment approval gate."
+        required: false
+        type: boolean
+        default: false
+      bundle_size_limit_bytes:
+        description: "Maximum Central Publisher deployment bundle size. Defaults to 1GB."
+        required: false
+        type: number
+        default: 1073741824
+      central_upload_url:
+        description: "Central Publisher upload endpoint."
+        required: false
+        type: string
+        default: "https://central.sonatype.com/api/v1/publisher/upload"
+      central_status_url:
+        description: "Central Publisher status endpoint base URL."
+        required: false
+        type: string
+        default: "https://central.sonatype.com/api/v1/publisher/status"
+      central_publish_url:
+        description: "Central Publisher publish endpoint base URL."
+        required: false
+        type: string
+        default: "https://central.sonatype.com/api/v1/publisher/deployment"
+      dry_run:
+        description: "Validate and print Central Publisher operations without uploading or promoting."
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      SONATYPE_CENTRAL_USERNAME:
+        description: "Sonatype Central Publisher username."
+        required: false
+      SONATYPE_CENTRAL_TOKEN:
+        description: "Sonatype Central Publisher token."
+        required: false
+    outputs:
+      deployment_id:
+        description: "Central Publisher deployment ID."
+        value: ${{ jobs.publish.outputs.deployment_id }}
+      bundle_path:
+        description: "Deployment bundle path."
+        value: ${{ jobs.publish.outputs.bundle_path }}
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  actions: read
+  checks: none
+  contents: read
+  deployments: none
+  discussions: none
+  id-token: write
+  issues: none
+  packages: read
+  pages: none
+  pull-requests: read
+  repository-projects: none
+  security-events: none
+  statuses: none
+
+jobs:
+  publish:
+    name: publish to Central Publisher
+    runs-on: linux-amd64-cpu4
+    container:
+      image: rapidsai/ci-conda:26.08-latest # zizmor: ignore[unpinned-images]
+    outputs:
+      deployment_id: ${{ steps.central.outputs.deployment_id }}
+      bundle_path: ${{ steps.bundle.outputs.bundle_path }}
+    steps:
+      - name: Validate release artifacts
+        env:
+          ARTIFACT_DIR: ${{ inputs.artifact_directory }}
+          VERSION: ${{ inputs.version }}
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          GROUP_ID: ${{ inputs.maven_group_id }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${VERSION}" == *SNAPSHOT* ]]; then
+            echo "::error::Central Publisher releases must not use SNAPSHOT versions"
+            exit 1
+          fi
+
+          if [[ ! -d "${ARTIFACT_DIR}" ]]; then
+            echo "::error::artifact_directory '${ARTIFACT_DIR}' does not exist"
+            exit 1
+          fi
+
+          group_path="${GROUP_ID//./\/}"
+          if [[ ! -d "${ARTIFACT_DIR}/${group_path}" ]]; then
+            echo "::error::artifact_directory does not contain expected Maven group path '${group_path}'"
+            exit 1
+          fi
+
+          expected_base="${ARTIFACT_ID}-${VERSION}"
+          if ! find "${ARTIFACT_DIR}" -type f -name "${expected_base}.pom" -print -quit | grep -q .; then
+            echo "::error::Missing expected POM '${expected_base}.pom'"
+            exit 1
+          fi
+
+          if ! find "${ARTIFACT_DIR}" -type f -name "*.asc" -print -quit | grep -q .; then
+            echo "::error::Release artifacts must include signatures"
+            exit 1
+          fi
+
+      - name: Prepare Central Publisher bundle
+        id: bundle
+        env:
+          ARTIFACT_DIR: ${{ inputs.artifact_directory }}
+          DEPLOYMENT_BUNDLE: ${{ inputs.deployment_bundle }}
+          BUNDLE_SIZE_LIMIT_BYTES: ${{ inputs.bundle_size_limit_bytes }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${DEPLOYMENT_BUNDLE}" ]]; then
+            bundle="${DEPLOYMENT_BUNDLE}"
+          else
+            bundle="${RUNNER_TEMP}/maven-central-deployment-bundle.zip"
+            (cd "${ARTIFACT_DIR}" && zip -qr "${bundle}" .)
+          fi
+
+          if [[ ! -f "${bundle}" ]]; then
+            echo "::error::Deployment bundle '${bundle}' does not exist"
+            exit 1
+          fi
+
+          size="$(stat -c '%s' "${bundle}")"
+          echo "Deployment bundle: ${bundle}"
+          echo "Deployment bundle size: ${size} bytes"
+
+          if (( size > BUNDLE_SIZE_LIMIT_BYTES )); then
+            echo "::error::Deployment bundle exceeds configured limit (${BUNDLE_SIZE_LIMIT_BYTES} bytes)"
+            exit 1
+          fi
+
+          echo "bundle_path=${bundle}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload, validate, and optionally promote
+        id: central
+        env:
+          BUNDLE_PATH: ${{ steps.bundle.outputs.bundle_path }}
+          WAIT_FOR_VALIDATION: ${{ inputs.wait_for_validation }}
+          PROMOTE: ${{ inputs.promote }}
+          CENTRAL_UPLOAD_URL: ${{ inputs.central_upload_url }}
+          CENTRAL_STATUS_URL: ${{ inputs.central_status_url }}
+          CENTRAL_PUBLISH_URL: ${{ inputs.central_publish_url }}
+          SONATYPE_CENTRAL_USERNAME: ${{ secrets.SONATYPE_CENTRAL_USERNAME }}
+          SONATYPE_CENTRAL_TOKEN: ${{ secrets.SONATYPE_CENTRAL_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            echo "DRY RUN: upload '${BUNDLE_PATH}' to '${CENTRAL_UPLOAD_URL}'"
+            echo "deployment_id=dry-run" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [[ -z "${SONATYPE_CENTRAL_USERNAME}" || -z "${SONATYPE_CENTRAL_TOKEN}" ]]; then
+            echo "::error::SONATYPE_CENTRAL_USERNAME and SONATYPE_CENTRAL_TOKEN are required when dry_run is false"
+            exit 1
+          fi
+
+          response="$(
+            curl --fail --show-error --silent \
+              --user "${SONATYPE_CENTRAL_USERNAME}:${SONATYPE_CENTRAL_TOKEN}" \
+              --form "bundle=@${BUNDLE_PATH};type=application/octet-stream" \
+              "${CENTRAL_UPLOAD_URL}"
+          )"
+          echo "Central Publisher upload response: ${response}"
+
+          deployment_id="$(jq -r '.deploymentId // .deployment_id // .id // empty' <<<"${response}")"
+          if [[ -z "${deployment_id}" ]]; then
+            echo "::error::Could not determine Central Publisher deployment ID"
+            exit 1
+          fi
+          echo "deployment_id=${deployment_id}" >> "${GITHUB_OUTPUT}"
+
+          if [[ "${WAIT_FOR_VALIDATION}" == "true" ]]; then
+            for _ in $(seq 1 120); do
+              status_response="$(
+                curl --fail --show-error --silent \
+                  --user "${SONATYPE_CENTRAL_USERNAME}:${SONATYPE_CENTRAL_TOKEN}" \
+                  "${CENTRAL_STATUS_URL}?id=${deployment_id}"
+              )"
+              status="$(jq -r '.deploymentState // .state // .status // empty' <<<"${status_response}")"
+              echo "Central Publisher status: ${status}"
+              case "${status}" in
+                VALIDATED) break ;;
+                FAILED|ERROR|PUBLISHING_FAILED)
+                  echo "::error::Central Publisher validation failed: ${status_response}"
+                  exit 1
+                  ;;
+              esac
+              sleep 30
+            done
+            if [[ "${status:-}" != "VALIDATED" ]]; then
+              echo "::error::Timed out waiting for Central Publisher VALIDATED status"
+              exit 1
+            fi
+          fi
+
+          if [[ "${PROMOTE}" == "true" ]]; then
+            publish_response="$(
+              curl --fail --show-error --silent \
+                --request POST \
+                --user "${SONATYPE_CENTRAL_USERNAME}:${SONATYPE_CENTRAL_TOKEN}" \
+                "${CENTRAL_PUBLISH_URL}/${deployment_id}"
+            )"
+            echo "Central Publisher promote response: ${publish_response}"
+
+            for _ in $(seq 1 120); do
+              status_response="$(
+                curl --fail --show-error --silent \
+                  --user "${SONATYPE_CENTRAL_USERNAME}:${SONATYPE_CENTRAL_TOKEN}" \
+                  "${CENTRAL_STATUS_URL}?id=${deployment_id}"
+              )"
+              status="$(jq -r '.deploymentState // .state // .status // empty' <<<"${status_response}")"
+              echo "Central Publisher status: ${status}"
+              case "${status}" in
+                PUBLISHED) break ;;
+                FAILED|ERROR|PUBLISHING_FAILED)
+                  echo "::error::Central Publisher publication failed: ${status_response}"
+                  exit 1
+                  ;;
+              esac
+              sleep 30
+            done
+            if [[ "${status:-}" != "PUBLISHED" ]]; then
+              echo "::error::Timed out waiting for Central Publisher PUBLISHED status"
+              exit 1
+            fi
+          fi
