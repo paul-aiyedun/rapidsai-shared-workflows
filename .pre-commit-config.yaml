@@ -2,6 +2,7 @@
 # Copyright (c) 2025, NVIDIA CORPORATION.
 
 ci:
+  autoupdate_schedule: 'monthly'
   skip: [actionlint-docker]
 
 repos:
@@ -22,7 +23,7 @@ repos:
       - id: codespell
         additional_dependencies: [tomli]
   - repo: https://github.com/rapidsai/pre-commit-hooks
-    rev: v1.5.1
+    rev: v1.6.0
     hooks:
       - id: verify-copyright
   - repo: https://github.com/zizmorcore/zizmor-pre-commit
