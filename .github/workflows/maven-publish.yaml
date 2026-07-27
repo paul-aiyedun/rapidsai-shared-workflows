@@ -1,0 +1,278 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Reusable workflow that publishes a Maven-repo-layout artifact:
+#   rc      -> Maven Central (via Sonatype Central Publisher Portal)
+#   nightly -> Sonatype snapshots (or a caller-provided override URL)
+#
+# Every uploaded file is GPG-signed and staged through Artifactory first.
+name: Maven publish
+
+on:
+  workflow_call:
+    inputs:
+      publication-type:
+        description: '"rc" or "nightly".'
+        required: true
+        type: string
+      artifact-name:
+        description: |
+          Name of the actions/upload-artifact-produced artifact (a
+          Maven-repo-layout tree) that this workflow should download 
+          and publish.
+        required: true
+        type: string
+      artifactory-url:
+        description: |
+          Base URL of the Artifactory server.
+        required: true
+        type: string
+      artifactory-repository:
+        description: Artifactory repository name (write access required).
+        required: true
+        type: string
+      rc-number:
+        description: |
+          RC iteration number. Optional even for rc: when empty, the upload
+          step auto-increments via an Artifactory AQL query (defaulting to
+          1 on the first-ever RC for this group+artifact). No effect for
+          nightly.
+        required: false
+        type: string
+        default: ''
+      nightly-date:
+        description: |
+          Nightly build date (YYYY-MM-DD). Optional: defaults to today
+          (UTC) when empty. No effect for rc.
+        required: false
+        type: string
+        default: ''
+      stage-for-maven-central-publish:
+        description: |
+          For rc: when true, upload the bundle to Sonatype Central Publisher
+          Portal and leave it as PENDING for a human to click Publish in the
+          Portal UI (https://central.sonatype.com) to release to Maven Central.
+          When false (default), the bundle is validated and then dropped -
+          nothing goes live on Maven Central. Ignored for nightly.
+        required: false
+        type: boolean
+        default: false
+      deploy-url:
+        description: |
+          For nightly: Sonatype snapshots endpoint. Defaults to the real
+          Sonatype snapshots repo; smoke testing overrides to an
+          Artifactory sandbox to avoid touching the real service.
+        required: false
+        type: string
+        default: 'https://central.sonatype.com/repository/maven-snapshots/'
+      deploy-repository-id:
+        description: |
+          For nightly: Maven repositoryId matching the settings.xml server
+          entry.
+        required: false
+        type: string
+        default: 'central-snapshots'
+      source-git-sha:
+        description: |
+          Git SHA to attach as the Artifactory source.git-sha property on
+          every uploaded file.
+        required: false
+        type: string
+        default: ''
+      runs-on:
+        description: Runner label to target.
+        required: false
+        type: string
+        default: 'linux-amd64-cpu4'
+      shared-workflows-ref:
+        description: |
+          Override for the ref of rapidsai/shared-workflows to self-check
+          out (so the job can reach the ci/maven-publish/*.sh scripts by
+          path). Empty (default) derives the ref from github.workflow_ref
+          so the checked-out scripts match the workflow file the caller
+          resolved to.
+        required: false
+        type: string
+        default: ''
+    secrets:
+      GPG_PRIVATE_KEY:
+        description: Armored GPG private key used to sign every artifact at upload.
+        required: true
+      GPG_PASSPHRASE:
+        description: Passphrase for GPG_PRIVATE_KEY.
+        required: true
+      ARTIFACTORY_USERNAME:
+        description: Artifactory account with write access.
+        required: true
+      ARTIFACTORY_TOKEN:
+        description: Auth token for ARTIFACTORY_USERNAME.
+        required: true
+      MAVEN_DEPLOY_USERNAME:
+        description: |
+          Sonatype user token username. Used for BOTH promote paths:
+          the Publisher Portal on the rc branch and Sonatype snapshots on
+          the nightly branch. In production both endpoints share the same
+          underlying user token.
+        required: true
+      MAVEN_DEPLOY_TOKEN:
+        description: Auth token for MAVEN_DEPLOY_USERNAME.
+        required: true
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  maven-publish:
+    name: maven publish (${{ inputs.publication-type }})
+    # Bare runs-on, no container: field. Matches cudf/java/ci's
+    # java-build/java-gather jobs - host scripts docker-run themselves when
+    # they need Maven.
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: Validate publication-type
+        run: |
+          case "${INPUTS_PUBLICATION_TYPE}" in
+            rc|nightly) ;;
+            *)
+              echo "Error: publication-type must be 'rc' or 'nightly' (got '${INPUTS_PUBLICATION_TYPE}')" >&2
+              exit 1
+              ;;
+          esac
+        env:
+          INPUTS_PUBLICATION_TYPE: ${{ inputs.publication-type }}
+
+      - name: Resolve shared-workflows ref
+        id: sw_ref
+        # In workflow_call context, github.ref is the *caller's* ref (e.g. a
+        # cudf release tag) which does not exist in this repo, so it can't
+        # be used as a fallback for the self-checkout. Parse
+        # github.workflow_ref instead - it always looks like
+        # `owner/repo/.github/workflows/foo.yaml@<full-ref>` and identifies
+        # the exact ref of THIS reusable workflow file.
+        run: |
+          if [[ -n "${INPUT_REF}" ]]; then
+            echo "ref=${INPUT_REF}" >> "${GITHUB_OUTPUT}"
+          else
+            REF="${GITHUB_WORKFLOW_REF##*@}"
+            echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
+          fi
+        env:
+          INPUT_REF: ${{ inputs.shared-workflows-ref }}
+          GITHUB_WORKFLOW_REF: ${{ github.workflow_ref }}
+
+      - name: Self-checkout rapidsai/shared-workflows
+        uses: actions/checkout@v5
+        with:
+          repository: rapidsai/shared-workflows
+          ref: ${{ steps.sw_ref.outputs.ref }}
+          path: shared-workflows
+          persist-credentials: false
+
+      - name: Compute nightly date
+        id: nightly_date
+        run: |
+          if [[ "${PUBLICATION_TYPE}" == "nightly" ]]; then
+            if [[ -n "${INPUT_NIGHTLY_DATE}" ]]; then
+              RESOLVED="${INPUT_NIGHTLY_DATE}"
+            else
+              RESOLVED="$(date -u +%Y-%m-%d)"
+            fi
+            echo "value=${RESOLVED}" >> "${GITHUB_OUTPUT}"
+            echo "Resolved nightly-date: ${RESOLVED}"
+          else
+            echo "value=" >> "${GITHUB_OUTPUT}"
+          fi
+        env:
+          PUBLICATION_TYPE: ${{ inputs.publication-type }}
+          INPUT_NIGHTLY_DATE: ${{ inputs.nightly-date }}
+
+      - name: Download input Maven-repo artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: maven-repo
+
+      - name: Sign and upload to Artifactory
+        id: upload
+        run: |
+          shared-workflows/ci/maven-publish/artifactory_upload.sh \
+            --input maven-repo \
+            --publication-type "${PUBLICATION_TYPE}" \
+            --artifactory-url "${ARTIFACTORY_URL}" \
+            --artifactory-repository "${ARTIFACTORY_REPOSITORY}" \
+            ${RC_NUMBER:+--rc-number "${RC_NUMBER}"} \
+            ${NIGHTLY_DATE:+--nightly-date "${NIGHTLY_DATE}"} \
+            ${SOURCE_GIT_SHA:+--source-git-sha "${SOURCE_GIT_SHA}"}
+        env:
+          PUBLICATION_TYPE: ${{ inputs.publication-type }}
+          ARTIFACTORY_URL: ${{ inputs.artifactory-url }}
+          ARTIFACTORY_REPOSITORY: ${{ inputs.artifactory-repository }}
+          RC_NUMBER: ${{ inputs.rc-number }}
+          NIGHTLY_DATE: ${{ steps.nightly_date.outputs.value }}
+          SOURCE_GIT_SHA: ${{ inputs.source-git-sha }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+
+      - name: Promote to Maven Central
+        if: ${{ inputs.publication-type == 'rc' }}
+        run: |
+          shared-workflows/ci/maven-publish/maven_central_publish.sh \
+            --group-id "${GROUP_ID}" \
+            --artifact-id "${ARTIFACT_ID}" \
+            --version "${VERSION}" \
+            --rc-number "${RC_NUMBER}" \
+            --artifactory-url "${ARTIFACTORY_URL}" \
+            --artifactory-repository "${ARTIFACTORY_REPOSITORY}" \
+            --auto-drop "${AUTO_DROP}"
+        env:
+          GROUP_ID: ${{ steps.upload.outputs.GROUP_ID }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.ARTIFACT_ID }}
+          VERSION: ${{ steps.upload.outputs.VERSION }}
+          RC_NUMBER: ${{ steps.upload.outputs.RC_NUMBER }}
+          ARTIFACTORY_URL: ${{ inputs.artifactory-url }}
+          ARTIFACTORY_REPOSITORY: ${{ inputs.artifactory-repository }}
+          # The underlying script's --auto-drop CLI flag mirrors Sonatype's
+          # API semantics. Invert here so the caller-facing input reads in
+          # the positive direction (opt-in to stage as PENDING for manual
+          # publish) while the safe default remains validate + drop.
+          AUTO_DROP: ${{ !inputs.stage-for-maven-central-publish }}
+          ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+          MAVEN_DEPLOY_USERNAME: ${{ secrets.MAVEN_DEPLOY_USERNAME }}
+          MAVEN_DEPLOY_TOKEN: ${{ secrets.MAVEN_DEPLOY_TOKEN }}
+
+      - name: Promote to Sonatype snapshots
+        if: ${{ inputs.publication-type == 'nightly' }}
+        run: |
+          shared-workflows/ci/maven-publish/sonatype_snapshots_publish.sh \
+            --group-id "${GROUP_ID}" \
+            --artifact-id "${ARTIFACT_ID}" \
+            --version "${VERSION}" \
+            --nightly-date "${NIGHTLY_DATE}" \
+            --artifactory-url "${ARTIFACTORY_URL}" \
+            --artifactory-repository "${ARTIFACTORY_REPOSITORY}" \
+            --deploy-url "${DEPLOY_URL}" \
+            --deploy-repository-id "${DEPLOY_REPOSITORY_ID}"
+        env:
+          GROUP_ID: ${{ steps.upload.outputs.GROUP_ID }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.ARTIFACT_ID }}
+          VERSION: ${{ steps.upload.outputs.VERSION }}
+          # Reuse the resolved nightly-date from the compute step so the
+          # upload sub-path and promote source path agree even across a UTC
+          # day boundary.
+          NIGHTLY_DATE: ${{ steps.nightly_date.outputs.value }}
+          ARTIFACTORY_URL: ${{ inputs.artifactory-url }}
+          ARTIFACTORY_REPOSITORY: ${{ inputs.artifactory-repository }}
+          DEPLOY_URL: ${{ inputs.deploy-url }}
+          DEPLOY_REPOSITORY_ID: ${{ inputs.deploy-repository-id }}
+          ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+          MAVEN_DEPLOY_USERNAME: ${{ secrets.MAVEN_DEPLOY_USERNAME }}
+          MAVEN_DEPLOY_TOKEN: ${{ secrets.MAVEN_DEPLOY_TOKEN }}
