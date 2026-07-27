@@ -2,25 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Generate a throwaway assemble_maven_repo.sh-shaped Maven repo directory
-# containing a trivial, real (compiled, not faked) hello-world Java class.
-# Useful for exercising the maven-publish pipeline end-to-end without needing
-# a real cudf build to feed it, and for poking at artifactory_upload.sh
-# --input by hand.
-#
-# Only --output-dir, --group-id, and --version are configurable. artifact-id
-# and classifiers are hardcoded constants in this script (see WORKER_* env
-# vars below). --version defaults to 0.0.1; override for e.g. -SNAPSHOT
-# testing.
-#
-# Output layout:
-#     <output-dir>/<groupPath>/hello-world/<version>/
-#         hello-world-<version>.jar               (unclassified primary)
-#         hello-world-<version>-x86_64.jar
-#         hello-world-<version>-aarch64.jar
-#         hello-world-<version>-sources.jar
-#         hello-world-<version>-javadoc.jar
-#         hello-world-<version>.pom
+# Generate an assemble_maven_repo.sh-shaped Maven repo containing a real
+# (compiled) hello-world jar, for exercising the maven-publish pipeline
+# without a real cudf build. artifact-id and classifiers are hardcoded;
+# --version defaults to 0.0.1 (override for -SNAPSHOT testing). See --help
+# for output layout.
 
 set -e
 
@@ -33,10 +19,8 @@ OUTPUT_DIR=""
 GROUP_ID=""
 VERSION="0.0.1"
 
-# Hardcoded constants - NOT configurable via CLI flags. Callers who need
-# different artifact-id/classifiers should either use their own real
-# Maven-repo layout (via artifactory_upload.sh --input directly) or fork
-# this script.
+# Hardcoded - callers needing different values should use their own
+# Maven-repo layout via artifactory_upload.sh --input directly.
 readonly ARTIFACT_ID="hello-world"
 readonly CLASSIFIERS="x86_64,aarch64"
 
@@ -121,8 +105,7 @@ parse_args "$@"
 require_arg --output-dir "${OUTPUT_DIR}"
 require_arg --group-id   "${GROUP_ID}"
 
-# Reject characters that would confuse the groupId->path split. Alphanum,
-# dot, dash, underscore.
+# Alphanum + . _ - only; anything else confuses the groupId->path split.
 if ! [[ ${GROUP_ID} =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "Error: --group-id must contain only [A-Za-z0-9._-] (got '${GROUP_ID}')" >&2
   exit 1
@@ -160,9 +143,7 @@ DOCKER_ARGS=(
 docker run "${DOCKER_ARGS[@]}" "${IMAGE}" \
   bash /scripts/generate_test_maven_repo_in_container.sh
 
-# Post-run: verify every expected file landed and is a real, non-empty ZIP
-# (jar) or non-empty POM. Silent stubs would defeat the whole point of a
-# "real hello-world jar" test payload.
+# Fail-loud if worker produced empty stubs instead of real jars.
 GROUP_PATH="${GROUP_ID//./\/}"
 DEST_DIR="${OUTPUT_DIR}/${GROUP_PATH}/${ARTIFACT_ID}/${VERSION}"
 

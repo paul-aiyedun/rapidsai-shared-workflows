@@ -2,18 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Promote a signed nightly staging bundle from Artifactory to the Sonatype
-# snapshots endpoint.
-#
-# This is the HOST-side orchestrator: parses CLI args, launches a
-# maven:3-eclipse-temurin-17 container that runs
-# sonatype_snapshots_publish_in_container.sh to do the actual mvn deploy +
-# .asc sidecar upload. Unlike maven_central_publish.sh, this step DOES need
-# Maven (for `mvn deploy:deploy-file`), so it runs in the container.
-#
-# Byte-forwarding: bundle jars, POM, and .asc signatures are downloaded from
-# Artifactory unmodified and re-deployed to Sonatype - the same signatures
-# consumers verify against.
+# Host orchestrator for promoting a signed nightly bundle from Artifactory
+# to the Sonatype snapshots endpoint. Launches a maven-image container
+# running sonatype_snapshots_publish_in_container.sh (needs Maven for
+# `mvn deploy:deploy-file`). All bundle bytes + .asc signatures are
+# byte-forwarded unmodified.
 
 set -e
 
@@ -56,8 +49,6 @@ REQUIRED:
 OPTIONS:
     --deploy-url <url>             Sonatype snapshots endpoint (default:
                                    https://central.sonatype.com/repository/maven-snapshots/).
-                                   Smoke can override to an Artifactory
-                                   sandbox to avoid touching real Sonatype.
     --deploy-repository-id <id>    Maven repositoryId matching the settings.xml
                                    server entry (default: central-snapshots).
     -h, --help                     Show this help message.
@@ -148,7 +139,6 @@ if ! [[ ${NIGHTLY_DATE} =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
   exit 1
 fi
 
-# Fail-fast on missing credentials before we launch a container.
 for var in ARTIFACTORY_USERNAME ARTIFACTORY_TOKEN \
            MAVEN_DEPLOY_USERNAME MAVEN_DEPLOY_TOKEN; do
   if [[ -z ${!var} ]]; then

@@ -2,26 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Promote a signed RC staging bundle from Artifactory to the Sonatype Central
-# Publisher Portal.
+# Byte-forwards a signed RC staging bundle from Artifactory to the Sonatype
+# Central Publisher Portal (USER_MANAGED mode). Never calls /publish:
+# --auto-drop true validates then drops; --auto-drop false leaves the
+# deployment PENDING for a human to release via the Portal UI.
 #
-# Byte-forwarding: every file the RC upload step signed and staged is
-# downloaded, zipped, and re-uploaded to the Publisher Portal unmodified. No
-# re-signing. Sonatype receives exactly the bytes and .asc signatures that
-# were originally staged.
-#
-# Publisher Portal deployment mode is always USER_MANAGED. This script never
-# calls Sonatype's /publish endpoint:
-#   --auto-drop true  (CI/test default) - validate, then drop. Nothing goes
-#                                          live on Maven Central.
-#   --auto-drop false - leave the deployment in the VALIDATED / PENDING state
-#                       so a human can log into the Sonatype UI and click
-#                       Publish to release it.
-#
-# HOST-only: this step does not need Maven or GPG, only curl+jq+zip, so it
-# runs directly on the runner - no docker, no container - matching
-# cudf/java/ci/assemble_maven_repo.sh's precedent of skipping docker when
-# the step doesn't need it.
+# Runs directly on the host (no docker) - only needs curl+jq+zip.
 
 set -e
 
@@ -53,20 +39,12 @@ Byte-forwards a signed RC staging bundle from Artifactory
 Publisher Portal in USER_MANAGED mode.
 
 REQUIRED:
-    -g, --group-id                 Maven groupId of the artifact, e.g. ai.rapids.
-                                   In the combined maven-publish.yaml workflow
-                                   this is threaded from the upload step's
-                                   outputs; on the CLI you supply it yourself.
+    -g, --group-id                 Maven groupId, e.g. ai.rapids.
     -a, --artifact-id              Maven artifactId, e.g. cudf.
-    -v, --version                  Release version being promoted, e.g. 26.08.0.
-    -n, --rc-number                RC iteration number of the bundle to
-                                   promote. In the combined workflow, this is
-                                   the exact RC_NUMBER the upload step just
-                                   resolved (never re-derived via AQL here).
-    -u, --artifactory-url          Base URL of the Artifactory server (no
-                                   trailing slash).
-    -r, --artifactory-repository   Artifactory repository name to download
-                                   from.
+    -v, --version                  Release version, e.g. 26.08.0.
+    -n, --rc-number                RC iteration number of the bundle to promote.
+    -u, --artifactory-url          Base URL of the Artifactory server.
+    -r, --artifactory-repository   Artifactory repository to download from.
 
 OPTIONS:
     --auto-drop <true|false>       Drop after VALIDATED (default: true).
@@ -161,13 +139,11 @@ if ! [[ ${RC_NUMBER} =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
-# RC promotes must never carry -SNAPSHOT.
 if [[ ${VERSION} == *-SNAPSHOT ]]; then
   echo "Error: RC promote requires a release-shaped version, got '${VERSION}'" >&2
   exit 1
 fi
 
-# Inline env-var assertions - same fail-fast rationale as the upload worker.
 for var in ARTIFACTORY_USERNAME ARTIFACTORY_TOKEN \
            MAVEN_DEPLOY_USERNAME MAVEN_DEPLOY_TOKEN; do
   if [[ -z ${!var} ]]; then
@@ -194,8 +170,7 @@ echo "  auto-drop:     ${AUTO_DROP}"
 echo "  source:        ${STAGING_URL}"
 echo "  target portal: ${CENTRAL_PORTAL_URL}"
 
-# Scratch working dir. All downloads land here mirroring the Maven-repo
-# layout Central expects inside the uploaded bundle zip.
+# Downloads mirror the Maven-repo layout Central expects inside the zip.
 WORK_DIR="$(mktemp -d)"
 BUNDLE_DIR="${WORK_DIR}/bundle"
 BUNDLE_ARTIFACT_DIR="${BUNDLE_DIR}/${GROUP_PATH}/${ARTIFACT_ID}/${VERSION}"
@@ -223,9 +198,6 @@ retry() {
   done
 }
 
-# List the staged files: Artifactory folder-info API returns .children[]
-# entries with .uri prefixed by '/'. Filter out the .asc/.md5/... sidecars
-# handled implicitly by the loop below.
 echo "Listing staged files at ${STAGING_URL}"
 STAGE_LISTING=$(retry 3 curl -sS -f \
   --user "${ARTIFACTORY_USERNAME}:${ARTIFACTORY_TOKEN}" \
@@ -238,10 +210,7 @@ if [[ ${#STAGED_FILES[@]} -eq 0 ]]; then
   exit 1
 fi
 
-# Sanity-check the bundle contents up front: Central rejects bundles missing
-# the classifier-less primary JAR, POM, sources, javadoc, or their .asc
-# sidecars. Fail early with a clear error rather than letting Central spit
-# out its opaque VALIDATION_FAILED status codes.
+# Fail early with a clear message rather than an opaque Central VALIDATION_FAILED.
 require_present() {
   local pattern=$1
   local desc=$2
@@ -273,14 +242,9 @@ BUNDLE_ZIP="${WORK_DIR}/${ARTIFACT_ID}-${VERSION}-rc${RC_NUMBER}.zip"
 echo "Zipping bundle at ${BUNDLE_ZIP}"
 (cd "${BUNDLE_DIR}" && zip -qr "${BUNDLE_ZIP}" .)
 
-# Upload to the Sonatype Central Publisher Portal.
-#
-# https://central.sonatype.org/publish/publish-portal-api/
-#
-# publishingType=USER_MANAGED means the deployment stays PENDING (i.e. does
-# not auto-publish) once VALIDATED. This script never calls /publish on it,
-# regardless of --auto-drop: drop-true drops it, drop-false leaves it in the
-# PENDING state for human review.
+# Publisher Portal API: https://central.sonatype.org/publish/publish-portal-api/
+# USER_MANAGED means the deployment never auto-publishes; --auto-drop
+# controls whether we drop it or leave it PENDING for a human.
 CENTRAL_AUTH=$(printf '%s:%s' "${MAVEN_DEPLOY_USERNAME}" "${MAVEN_DEPLOY_TOKEN}" | base64 -w0)
 
 echo "Uploading bundle to Publisher Portal"
@@ -296,9 +260,7 @@ if [[ -z ${DEPLOYMENT_ID} ]]; then
 fi
 echo "  deployment id: ${DEPLOYMENT_ID}"
 
-# Poll until VALIDATED (success) or a terminal failure state. FAILED /
-# VALIDATION_FAILED are hard errors; PUBLISHED indicates someone else pushed
-# publish underneath us (unexpected in USER_MANAGED but still terminal).
+# Poll until VALIDATED or a terminal state.
 echo "Polling status (interval=${POLL_INTERVAL_SEC}s, timeout=${POLL_TIMEOUT_SEC}s)"
 STATUS_URL="${CENTRAL_PORTAL_URL}/api/v1/publisher/status?id=${DEPLOYMENT_ID}"
 ELAPSED=0

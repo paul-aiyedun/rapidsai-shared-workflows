@@ -18,7 +18,7 @@ on:
       artifact-name:
         description: |
           Name of the actions/upload-artifact-produced artifact (a
-          Maven-repo-layout tree) that this workflow should download 
+          Maven-repo-layout tree) that this workflow should download
           and publish.
         required: true
         type: string
@@ -58,10 +58,7 @@ on:
         type: boolean
         default: false
       deploy-url:
-        description: |
-          For nightly: Sonatype snapshots endpoint. Defaults to the real
-          Sonatype snapshots repo; smoke testing overrides to an
-          Artifactory sandbox to avoid touching the real service.
+        description: 'For nightly: Sonatype snapshots endpoint override.'
         required: false
         type: string
         default: 'https://central.sonatype.com/repository/maven-snapshots/'
@@ -129,9 +126,6 @@ permissions:
 jobs:
   maven-publish:
     name: maven publish (${{ inputs.publication-type }})
-    # Bare runs-on, no container: field. Matches cudf/java/ci's
-    # java-build/java-gather jobs - host scripts docker-run themselves when
-    # they need Maven.
     runs-on: ${{ inputs.runs-on }}
     steps:
       - name: Validate publication-type
@@ -148,12 +142,9 @@ jobs:
 
       - name: Resolve shared-workflows ref
         id: sw_ref
-        # In workflow_call context, github.ref is the *caller's* ref (e.g. a
-        # cudf release tag) which does not exist in this repo, so it can't
-        # be used as a fallback for the self-checkout. Parse
-        # github.workflow_ref instead - it always looks like
-        # `owner/repo/.github/workflows/foo.yaml@<full-ref>` and identifies
-        # the exact ref of THIS reusable workflow file.
+        # In workflow_call context github.ref is the caller's ref (which
+        # doesn't exist here); github.workflow_ref
+        # (owner/repo/.github/workflows/foo.yaml@<ref>) is authoritative.
         run: |
           if [[ -n "${INPUT_REF}" ]]; then
             echo "ref=${INPUT_REF}" >> "${GITHUB_OUTPUT}"
@@ -238,10 +229,7 @@ jobs:
           RC_NUMBER: ${{ steps.upload.outputs.RC_NUMBER }}
           ARTIFACTORY_URL: ${{ inputs.artifactory-url }}
           ARTIFACTORY_REPOSITORY: ${{ inputs.artifactory-repository }}
-          # The underlying script's --auto-drop CLI flag mirrors Sonatype's
-          # API semantics. Invert here so the caller-facing input reads in
-          # the positive direction (opt-in to stage as PENDING for manual
-          # publish) while the safe default remains validate + drop.
+          # Invert: stage-for-...=true means don't auto-drop.
           AUTO_DROP: ${{ !inputs.stage-for-maven-central-publish }}
           ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
           ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
@@ -264,9 +252,7 @@ jobs:
           GROUP_ID: ${{ steps.upload.outputs.GROUP_ID }}
           ARTIFACT_ID: ${{ steps.upload.outputs.ARTIFACT_ID }}
           VERSION: ${{ steps.upload.outputs.VERSION }}
-          # Reuse the resolved nightly-date from the compute step so the
-          # upload sub-path and promote source path agree even across a UTC
-          # day boundary.
+          # Same nightly-date as upload; avoids UTC day-boundary drift.
           NIGHTLY_DATE: ${{ steps.nightly_date.outputs.value }}
           ARTIFACTORY_URL: ${{ inputs.artifactory-url }}
           ARTIFACTORY_REPOSITORY: ${{ inputs.artifactory-repository }}

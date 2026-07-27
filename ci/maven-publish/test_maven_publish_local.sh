@@ -2,28 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# NOT intended for use from any GitHub Actions workflow. Local developer
-# entry point only; CI must invoke the reusable maven-publish.yaml workflow
-# (.github/workflows/maven-publish.yaml) directly. A repo-wide verify_scripts.sh
-# guard fails the build if any workflow YAML ever references this script.
+# Local-dev-only end-to-end wrapper for the maven-publish pipeline. NOT for
+# CI use - CI must call maven-publish.yaml directly (enforced by
+# verify_scripts.sh). Chains artifactory_upload.sh -> promote script based
+# on --publication-type, forwarding resolved coordinates between them.
 #
-# End-to-end local test wrapper for the maven-publish pipeline.
-#
-# Chains artifactory_upload.sh with the correct promote script based on
-# --publication-type, forwarding the resolved GROUP_ID / ARTIFACT_ID /
-# VERSION / RC_NUMBER between them so the developer never has to plumb
-# these by hand.
-#
-# Two modes, driven by --input:
-#   With --input <dir>:     use the supplied Maven-repo-layout directory
-#                           (e.g. output of assemble_maven_repo.sh from a
-#                           real cudf build). Requires the caller to supply
-#                           GPG_PRIVATE_KEY / GPG_PASSPHRASE themselves.
-#   Without --input:        call generate_test_maven_repo.sh to build a
-#                           synthetic hello-world Maven repo, then generate
-#                           a throwaway GPG key for signing so the pipeline
-#                           runs end-to-end with zero setup. Great for
-#                           first-run smoke testing.
+# With --input <dir>: use the supplied Maven-repo tree (caller supplies GPG
+# creds). Without --input: generate a synthetic hello-world payload + a
+# throwaway GPG key for zero-setup smoke testing.
 
 set -e
 
@@ -208,9 +194,8 @@ cleanup_work_root() {
 }
 trap cleanup_work_root EXIT
 
-# Path 1: caller supplied a real Maven-repo directory. They must supply GPG
-# credentials themselves, because we won't sign a real release payload with
-# a throwaway key.
+# Caller supplies GPG creds themselves - won't sign a real payload with a
+# throwaway key.
 if [[ -n ${INPUT_DIR} ]]; then
   if [[ ! -d ${INPUT_DIR} ]]; then
     echo "Error: --input '${INPUT_DIR}' does not exist" >&2
@@ -223,12 +208,8 @@ if [[ -n ${INPUT_DIR} ]]; then
     fi
   done
   echo "Using supplied Maven-repo input: ${INPUT_DIR}"
-  # Force nightly SNAPSHOT if the version in the POM says so, and vice
-  # versa. The upload worker will validate this again but a clear error
-  # here saves waiting for docker startup.
   MAVEN_REPO="${INPUT_DIR}"
 else
-  # Path 2: no --input. Generate a synthetic payload and throwaway GPG key.
   echo "Generating synthetic Maven-repo payload"
   MAVEN_REPO="${WORK_ROOT}/synthetic-repo"
   # Nightly needs -SNAPSHOT; rc uses the plain release version.
@@ -242,8 +223,6 @@ else
     --group-id "${GROUP_ID}" \
     --version "${GENERATE_VERSION}"
 
-  # Throwaway GPG key so the upload step can sign without needing the real
-  # release key. Only used for local testing.
   if ! command -v gpg >/dev/null 2>&1; then
     echo "Error: gpg not available on host; cannot generate throwaway signing key" >&2
     exit 1
@@ -269,9 +248,8 @@ EOF
   export GPG_PRIVATE_KEY GPG_PASSPHRASE
 fi
 
-# Upload step. Its stdout carries the resolved coordinates as key=value
-# lines; we tee them to a file to source afterwards so downstream steps get
-# the exact same values the upload step wrote.
+# Capture upload_metadata via $GITHUB_OUTPUT so we can source resolved
+# coordinates back into this shell for the promote step.
 echo
 echo "=== Artifactory upload ==="
 UPLOAD_METADATA="${WORK_ROOT}/upload_metadata.env"
@@ -290,9 +268,6 @@ if [[ -n ${NIGHTLY_DATE} ]]; then
   UPLOAD_ARGS+=(--nightly-date "${NIGHTLY_DATE}")
 fi
 
-# artifactory_upload.sh writes to $GITHUB_OUTPUT if set. Redirect it to our
-# scratch file so we can source the resolved coordinates back into this
-# shell for the promote step.
 GITHUB_OUTPUT="${UPLOAD_METADATA}" "${SCRIPT_DIR}/artifactory_upload.sh" "${UPLOAD_ARGS[@]}"
 
 # shellcheck disable=SC1090

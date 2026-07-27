@@ -2,22 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# In-container worker for generate_test_maven_repo.sh.
-#
-# Compiles a trivial HelloWorld.java once with the real javac, packages one
-# JAR per classifier via the real jar tool (so the output looks structurally
-# identical to a real assemble_maven_repo.sh build), copies the first
-# classifier's JAR to the unclassified primary, runs javadoc + zips sources
-# on the same source file, and writes a minimal valid POM.
-#
-# No signing here - .asc files get produced later by
-# artifactory_upload_in_container.sh, exactly as they do for a real build.
-#
-# Inputs (environment variables):
-#   GROUP_ID / ARTIFACT_ID / VERSION   (required).
-#   CLASSIFIERS                        Comma-separated list of classifier
-#                                      names (required).
-#   HOST_UID / HOST_GID                chown targets for /output on exit.
+# In-container worker for generate_test_maven_repo.sh. Compiles HelloWorld.java,
+# packages one jar per classifier (all byte-identical, only filenames differ),
+# copies the first as the unclassified primary, then writes sources jar,
+# javadoc jar, and a minimal POM. No signing here - .asc files come later
+# from artifactory_upload_in_container.sh.
 
 set -e
 
@@ -35,8 +24,7 @@ _chown_output_on_exit() {
 }
 trap _chown_output_on_exit EXIT
 
-# Ensure the jar/javadoc tools are on PATH. maven:3-eclipse-temurin-17 ships
-# them by default, but this makes the failure mode explicit if that changes.
+# Explicit failure mode if the base image ever drops these.
 for cmd in javac jar javadoc zip; do
   if ! command -v "${cmd}" >/dev/null 2>&1; then
     if [[ ${cmd} == "zip" ]]; then
@@ -62,19 +50,9 @@ mkdir -p "${SRC_DIR}" "${CLASSES_DIR}" "${JAVADOC_DIR}"
 
 SOURCE_FILE="${SRC_DIR}/HelloWorld.java"
 cat > "${SOURCE_FILE}" <<'EOF'
-/**
- * Trivial hello-world class for the maven-publish pipeline test payload.
- *
- * The class itself does nothing interesting - its purpose is to give the
- * generated JAR a real, compiled .class entry so publish-pipeline tests
- * exercise valid JAR bytecode, not empty stubs.
- */
+/** Trivial hello-world class for the maven-publish pipeline test payload. */
 public class HelloWorld {
-    /**
-     * Prints a hello message to standard output.
-     *
-     * @param args command-line arguments (ignored)
-     */
+    /** @param args ignored */
     public static void main(String[] args) {
         System.out.println("Hello, World!");
     }
@@ -89,11 +67,6 @@ if [[ ! -f "${CLASSES_DIR}/HelloWorld.class" ]]; then
   exit 1
 fi
 
-# Package one jar per classifier from the SAME compiled classes. The
-# classifier is purely a labelling distinction here (real cudf uses it to
-# distinguish per-arch/per-cuda binaries); this synthetic build has no such
-# variation so all classifier jars are byte-identical modulo classifier
-# labelling in the filename.
 IFS=',' read -ra CLASSIFIER_LIST <<< "${CLASSIFIERS}"
 if [[ ${#CLASSIFIER_LIST[@]} -eq 0 ]]; then
   echo "Error: CLASSIFIERS resolved to an empty list" >&2
@@ -114,27 +87,20 @@ for classifier in "${CLASSIFIER_LIST[@]}"; do
   fi
 done
 
-# Seed the unclassified primary from the first classifier - mirrors
-# assemble_maven_repo.sh's own precedent of copying cuda12 to the
-# unclassified primary.
+# Mirrors assemble_maven_repo.sh (copies cuda12 as the unclassified primary).
 UNCLASSIFIED_JAR="${DEST_DIR}/${ARTIFACT_ID}-${VERSION}.jar"
 cp -f "${DEST_DIR}/${ARTIFACT_ID}-${VERSION}-${FIRST_CLASSIFIER}.jar" "${UNCLASSIFIED_JAR}"
 
-# Sources jar: just the .java file(s).
 echo "Packaging sources jar"
 SOURCES_JAR="${DEST_DIR}/${ARTIFACT_ID}-${VERSION}-sources.jar"
 jar --create --file "${SOURCES_JAR}" -C "${SRC_DIR}" .
 
-# Javadoc jar: real javadoc HTML for the same source file.
 echo "Generating javadoc"
 javadoc -d "${JAVADOC_DIR}" -quiet "${SOURCE_FILE}" > /dev/null
 
 JAVADOC_JAR="${DEST_DIR}/${ARTIFACT_ID}-${VERSION}-javadoc.jar"
 jar --create --file "${JAVADOC_JAR}" -C "${JAVADOC_DIR}" .
 
-# Minimal, valid POM. groupId/artifactId/version come from env; packaging is
-# jar. No dependencies. Consumers just care that Maven Central sees a
-# well-formed POM.
 POM_FILE="${DEST_DIR}/${ARTIFACT_ID}-${VERSION}.pom"
 cat > "${POM_FILE}" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

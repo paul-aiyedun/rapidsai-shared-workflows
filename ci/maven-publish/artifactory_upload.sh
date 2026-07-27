@@ -2,26 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Sign a Maven-repo-layout input tree and upload it to an internal Artifactory
-# repository under a per-iteration sub-path.
-#
-# This is the HOST-side orchestrator: it parses CLI args, launches a
-# maven:3-eclipse-temurin-17 container that runs artifactory_upload_in_container.sh
-# to do the actual signing + upload, then reads the worker's output metadata
-# file (GROUP_ID / ARTIFACT_ID / RC_NUMBER) off a bind-mounted output dir and
-# relays it both to stdout (as key=value lines) and, when running in GitHub
-# Actions, to $GITHUB_OUTPUT.
-#
-# The same host script is what both CI and a developer's local terminal call.
-# There is no separate local-only wrapper.
-#
-# Publication types:
-#   rc       - RC iteration N lives at staging/rc-<N>/<groupPath>/<artifactId>/<version>/.
-#              --rc-number may be omitted, in which case the worker auto-increments
-#              via an Artifactory AQL query and treats zero-results as bootstrap
-#              (RC_NUMBER=1).
-#   nightly  - Nightly for date D lives at staging/nightly/<D>/<groupPath>/<artifactId>/<version>/.
-#              --nightly-date defaults to today's UTC date if omitted.
+# Host orchestrator for signing + uploading a Maven-repo-layout tree to
+# Artifactory. Launches a maven-image container running
+# artifactory_upload_in_container.sh, then relays the worker's resolved
+# GROUP_ID/ARTIFACT_ID/VERSION/RC_NUMBER (or NIGHTLY_DATE) both to stdout
+# and to $GITHUB_OUTPUT. Same script for CI and local dev - no separate
+# wrapper. See --help for arg reference.
 
 set -e
 
@@ -157,9 +143,7 @@ if [[ ! -d ${INPUT_DIR} ]]; then
   exit 1
 fi
 
-# Nightly convenience: default --nightly-date to today (UTC). --rc-number
-# stays optional and is resolved by the worker via AQL auto-increment when
-# empty.
+# Default nightly-date to today (UTC); rc-number is auto-resolved by worker.
 if [[ ${PUBLICATION_TYPE} == "nightly" && -z ${NIGHTLY_DATE} ]]; then
   NIGHTLY_DATE=$(date -u +%Y-%m-%d)
 fi
@@ -173,10 +157,7 @@ if [[ ${PUBLICATION_TYPE} == "rc" && -n ${NIGHTLY_DATE} ]]; then
   exit 1
 fi
 
-# Fail-fast on missing credentials before we spend time launching a container.
-# This mirrors the inline env-var assertions in the worker: it turns "someone
-# forgot to set a secret" into an immediate, clearly-named error rather than
-# a confusing downstream 401.
+# Fail-fast before launching a container.
 for var in GPG_PRIVATE_KEY GPG_PASSPHRASE ARTIFACTORY_USERNAME ARTIFACTORY_TOKEN; do
   if [[ -z ${!var} ]]; then
     echo "Error: ${var} must be set" >&2
@@ -186,11 +167,7 @@ done
 
 INPUT_DIR="$(cd "${INPUT_DIR}" && pwd)"
 
-# Bind-mounted scratch dir. The worker writes a small metadata file
-# (upload_metadata.env) there containing the resolved GROUP_ID / ARTIFACT_ID /
-# RC_NUMBER / NIGHTLY_DATE / VERSION lines. This host script reads it back
-# after `docker run` exits, per cudf/java/ci/build_cudf_java_jar.sh's
-# host-reads-worker-output pattern.
+# Worker writes upload_metadata.env here; we source it back after docker exits.
 OUTPUT_SCRATCH="$(mktemp -d)"
 cleanup_output_scratch() {
   rm -rf "${OUTPUT_SCRATCH}"
@@ -233,9 +210,7 @@ DOCKER_ARGS=(
 docker run "${DOCKER_ARGS[@]}" "${IMAGE}" \
   bash /scripts/artifactory_upload_in_container.sh
 
-# Post-run: assert the worker wrote its metadata file, and that every expected
-# key is present. Silently propagating empty GROUP_ID / ARTIFACT_ID / RC_NUMBER
-# downstream would be worse than failing loudly here.
+# Fail loudly on missing/incomplete metadata rather than propagating empties.
 METADATA_FILE="${OUTPUT_SCRATCH}/upload_metadata.env"
 if [[ ! -f ${METADATA_FILE} ]]; then
   echo "Error: worker did not produce ${METADATA_FILE}" >&2
@@ -262,9 +237,7 @@ if [[ ${PUBLICATION_TYPE} == "nightly" && -z ${NIGHTLY_DATE} ]]; then
   exit 1
 fi
 
-# Relay the resolved metadata both to stdout (so a human running this locally
-# can `eval` it if they want) and, when running in GHA, to $GITHUB_OUTPUT
-# where downstream job steps read it as step outputs.
+# Relay to stdout (human-eval-able) and to $GITHUB_OUTPUT when in GHA.
 {
   echo "GROUP_ID=${GROUP_ID}"
   echo "ARTIFACT_ID=${ARTIFACT_ID}"

@@ -6,9 +6,7 @@
 # Meant to be sourced, not executed:
 #   . "${SCRIPT_DIR}/argparse.sh"
 
-# require_value <flag_name> <value>
-# Check: exit 1 when <value> is empty (i.e. the flag was passed
-# without its argument, or was the last token on the command line).
+# require_value <flag> <value>: exit 1 if <value> is empty.
 require_value() {
   local flag=$1
   local value=$2
@@ -18,11 +16,7 @@ require_value() {
   fi
 }
 
-# require_arg <flag_name> <value>
-# Check: assert that a required flag was actually supplied by the
-# caller. Prints the script's print_help (if defined) then exits 1 on failure.
-# Preserves the existing behavior of showing help after a "required flag missing"
-# error.
+# require_arg <flag> <value>: exit 1 if <value> empty, printing help if defined.
 require_arg() {
   local flag=$1
   local value=$2

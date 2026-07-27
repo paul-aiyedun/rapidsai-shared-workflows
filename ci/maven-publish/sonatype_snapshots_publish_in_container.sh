@@ -2,30 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# In-container worker for sonatype_snapshots_publish.sh.
-#
-# Downloads a signed nightly staging bundle from Artifactory
-# (staging/nightly/<date>/<groupPath>/<artifactId>/<version>/), then
-# forwards it to a Sonatype snapshots endpoint via `mvn deploy:deploy-file`,
-# then uploads the .asc sidecars to the server-assigned timestamped
-# filenames via a second curl pass (mvn deploy:deploy-file doesn't accept
-# pre-existing signature files as attached artifacts).
-#
-# Inputs (environment variables):
-#   GROUP_ID / ARTIFACT_ID / VERSION           (required).
-#   NIGHTLY_DATE                               YYYY-MM-DD (required).
-#   ARTIFACTORY_URL / ARTIFACTORY_REPOSITORY   (required).
-#   ARTIFACTORY_USERNAME / ARTIFACTORY_TOKEN   (required).
-#   MAVEN_DEPLOY_USERNAME / MAVEN_DEPLOY_TOKEN Credential for DEPLOY_URL
-#                                              (required).
-#   DEPLOY_URL                                 Snapshots endpoint (required).
-#   DEPLOY_REPOSITORY_ID                       Matches settings.xml server id
-#                                              (required).
-#   HOST_UID / HOST_GID                        chown targets.
+# In-container worker for sonatype_snapshots_publish.sh. Downloads the
+# signed nightly bundle from Artifactory, forwards it via
+# `mvn deploy:deploy-file`, then sidecar-uploads the .asc files to the
+# server-assigned timestamped filenames (deploy:deploy-file can't attach
+# them). All configuration comes from env vars set by the host script.
 
 set -e
 
-# Inline env-var assertions - fail fast before any download or mvn call.
 for var in GROUP_ID ARTIFACT_ID VERSION NIGHTLY_DATE \
            ARTIFACTORY_URL ARTIFACTORY_REPOSITORY \
            ARTIFACTORY_USERNAME ARTIFACTORY_TOKEN \
@@ -47,7 +31,6 @@ if ! [[ ${NIGHTLY_DATE} =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
   exit 1
 fi
 
-# Ensure runtime deps are present in the maven image.
 if ! command -v jq >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 \
      || ! command -v xmllint >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
@@ -109,7 +92,6 @@ for f in "${STAGED_FILES[@]}"; do
     "${STAGING_URL}/${f}"
 done
 
-# Bundle sanity: POM + at least one JAR + matching .asc for each.
 POM_FILE="${BUNDLE_DIR}/${ARTIFACT_ID}-${VERSION}.pom"
 POM_ASC="${POM_FILE}.asc"
 if [[ ! -f ${POM_FILE} || ! -f ${POM_ASC} ]]; then
@@ -117,9 +99,6 @@ if [[ ! -f ${POM_FILE} || ! -f ${POM_ASC} ]]; then
   exit 1
 fi
 
-# Discover the classifier JARs actually present in the bundle. Sources /
-# javadoc get named "sources" and "javadoc" respectively; everything else
-# is a real per-arch or per-cuda classifier.
 mapfile -t ALL_JARS < <(find "${BUNDLE_DIR}" -maxdepth 1 -type f \
   -name "${ARTIFACT_ID}-${VERSION}*.jar" | sort)
 if [[ ${#ALL_JARS[@]} -eq 0 ]]; then
@@ -127,8 +106,7 @@ if [[ ${#ALL_JARS[@]} -eq 0 ]]; then
   exit 1
 fi
 
-# Set up settings.xml with the deploy server credentials. Use a per-run
-# path so we never leak MAVEN_DEPLOY_TOKEN into any shared ~/.m2 config.
+# Per-run settings.xml keeps MAVEN_DEPLOY_TOKEN out of any shared ~/.m2 config.
 SETTINGS_FILE="${WORK_DIR}/settings.xml"
 cat > "${SETTINGS_FILE}" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -145,18 +123,13 @@ EOF
 
 echo "Deploying bundle to ${DEPLOY_URL} (repositoryId=${DEPLOY_REPOSITORY_ID})"
 
-# Identify the "main" jar for deploy:deploy-file. Convention: the classifier-
-# less <artifactId>-<version>.jar is the primary; everything else is either
-# sources/javadoc (identified by name) or a classified variant.
 MAIN_JAR="${BUNDLE_DIR}/${ARTIFACT_ID}-${VERSION}.jar"
 if [[ ! -f ${MAIN_JAR} ]]; then
   echo "Error: no unclassified primary jar found at ${MAIN_JAR}" >&2
   exit 1
 fi
 
-# Build the --files / --classifiers / --types comma-separated lists for the
-# side-artifacts (everything except the main jar). deploy:deploy-file
-# accepts these via -Dfiles / -Dclassifiers / -Dtypes.
+# Comma-separated -Dfiles / -Dclassifiers / -Dtypes for all non-main jars.
 SIDE_FILES=""
 SIDE_CLASSIFIERS=""
 SIDE_TYPES=""
@@ -199,10 +172,9 @@ fi
 
 retry 3 mvn "${DEPLOY_ARGS[@]}"
 
-# After deploy:deploy-file, Sonatype has rewritten every SNAPSHOT filename to
-# a server-assigned timestamped form (e.g. cudf-26.08.0-20260727.123456-1.jar).
-# Fetch the maven-metadata.xml to discover those timestamped names, then
-# upload each .asc sidecar under its corresponding timestamped filename.
+# Sonatype rewrites SNAPSHOT filenames to a timestamped form
+# (e.g. cudf-26.08.0-20260727.123456-1.jar); discover them from maven-metadata.xml
+# so we can upload each .asc under its corresponding server-side name.
 echo "Reading maven-metadata.xml to discover server-assigned timestamped filenames"
 DEPLOY_URL_STRIPPED="${DEPLOY_URL%/}"
 METADATA_URL="${DEPLOY_URL_STRIPPED}/${GROUP_PATH}/${ARTIFACT_ID}/${VERSION}/maven-metadata.xml"
@@ -212,9 +184,8 @@ retry 3 curl -sS -f \
   -o "${METADATA_FILE}" \
   "${METADATA_URL}"
 
-# maven-metadata.xml carries <snapshot><timestamp> + <buildNumber> that
-# combine into the timestamp component. E.g. version 26.08.0-SNAPSHOT with
-# timestamp 20260727.123456 and buildNumber 1 => 26.08.0-20260727.123456-1.
+# <snapshot><timestamp> + <buildNumber> => 26.08.0-SNAPSHOT becomes e.g.
+# 26.08.0-20260727.123456-1 on the server.
 TIMESTAMP=$(xmllint --xpath 'string(/metadata/versioning/snapshot/timestamp)' "${METADATA_FILE}")
 BUILD_NUMBER=$(xmllint --xpath 'string(/metadata/versioning/snapshot/buildNumber)' "${METADATA_FILE}")
 if [[ -z ${TIMESTAMP} || -z ${BUILD_NUMBER} ]]; then
@@ -227,16 +198,12 @@ TIMESTAMPED_VERSION="${VERSION_BASE}-${TIMESTAMP}-${BUILD_NUMBER}"
 
 echo "Server-assigned timestamped version: ${TIMESTAMPED_VERSION}"
 
-# For each staged .asc, PUT it to the timestamped remote filename. We keep
-# the same classifier/suffix that the original .asc carried locally.
+# PUT each .asc under its server-assigned timestamped name, preserving
+# classifier/suffix from the local filename.
 upload_asc() {
   local local_asc=$1
   local base
   base=$(basename "${local_asc}")
-
-  # base looks like ${ARTIFACT_ID}-${VERSION}[-classifier].{jar,pom}.asc.
-  # Replace the version portion with the timestamped version to get the
-  # server-side name Sonatype now stores this artifact under.
   local remote_base=${base/${VERSION}/${TIMESTAMPED_VERSION}}
   local remote_url="${DEPLOY_URL_STRIPPED}/${GROUP_PATH}/${ARTIFACT_ID}/${VERSION}/${remote_base}"
 

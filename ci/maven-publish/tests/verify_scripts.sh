@@ -2,19 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Offline verification harness for the ci/maven-publish/*.sh scripts.
+# Offline verification harness for ci/maven-publish/*.sh: negative-path +
+# offline positive-path checks + YAML structural invariants. Requires no
+# live Artifactory, Sonatype creds, or docker. Live-service coverage comes
+# from ref-pinned cudf PRs and cudf's real CI post-integration.
 #
-# Covers the negative-path and offline positive-path assertions from the
-# unified maven-publish plan without requiring a live Artifactory, real
-# Sonatype credentials, or a docker daemon. Live-service checks (real AQL
-# query, real Publisher Portal round-trip) are covered by ref-pinning a
-# WIP cudf PR against this workflow branch and by cudf's own CI once the
-# integration lands - see the plan for the coverage matrix.
-#
-# Run with:
-#   ci/maven-publish/tests/verify_scripts.sh
-#
-# Exits 0 on success, 1 on the first assertion failure.
+# Run:  ci/maven-publish/tests/verify_scripts.sh
 
 set -e
 
@@ -33,10 +26,7 @@ fail() {
   echo "  FAIL: $*" >&2
 }
 
-# Run a script with the given args and env, capturing stdout+stderr and the
-# exit code. Then assert:
-#   - exit code matches EXPECTED_RC
-#   - output contains EXPECTED_MSG (fixed string, case-sensitive)
+# assert_fails_with <desc> <expected_rc> <expected_msg> <cmd...>
 assert_fails_with() {
   local desc=$1
   local expected_rc=$2
@@ -63,7 +53,7 @@ assert_fails_with() {
   pass "${desc}"
 }
 
-# Same as assert_fails_with but for a shell-runnable expression via bash -c.
+# assert_fails_with_env: same, but runs <cmd> as a bash -c expression.
 assert_fails_with_env() {
   local desc=$1
   local expected_rc=$2
@@ -124,8 +114,6 @@ done
 
 echo
 echo "== 4. Required-flag omission is caught with 'is required' error =="
-# artifactory_upload requires --input, --publication-type, --artifactory-url,
-# --artifactory-repository.
 assert_fails_with "artifactory_upload: missing --input" \
   1 "--input is required" \
   "${BASE_DIR}/artifactory_upload.sh" \
@@ -133,7 +121,6 @@ assert_fails_with "artifactory_upload: missing --input" \
     --artifactory-url http://example \
     --artifactory-repository test-repo
 
-# generate_test_maven_repo requires --output-dir and --group-id.
 assert_fails_with "generate_test_maven_repo: missing --output-dir" \
   1 "--output-dir is required" \
   "${BASE_DIR}/generate_test_maven_repo.sh" --group-id io.github.myuser
@@ -142,21 +129,18 @@ assert_fails_with "generate_test_maven_repo: missing --group-id" \
   1 "--group-id is required" \
   "${BASE_DIR}/generate_test_maven_repo.sh" --output-dir /tmp/gen-missing-groupid
 
-# maven_central_publish requires the full coordinates set.
 assert_fails_with "maven_central_publish: missing --group-id" \
   1 "--group-id is required" \
   "${BASE_DIR}/maven_central_publish.sh" \
     --artifact-id cudf --version 26.08.0 --rc-number 1 \
     --artifactory-url http://example --artifactory-repository test
 
-# sonatype_snapshots_publish requires the full coordinates set + nightly-date.
 assert_fails_with "sonatype_snapshots_publish: missing --nightly-date" \
   1 "--nightly-date is required" \
   "${BASE_DIR}/sonatype_snapshots_publish.sh" \
     --group-id ai.rapids --artifact-id cudf --version 26.08.0-SNAPSHOT \
     --artifactory-url http://example --artifactory-repository test
 
-# test_maven_publish_local requires --publication-type + artifactory info.
 assert_fails_with "test_maven_publish_local: missing --publication-type" \
   1 "--publication-type is required" \
   "${BASE_DIR}/test_maven_publish_local.sh" \
@@ -173,9 +157,6 @@ assert_fails_with "artifactory_upload: invalid --publication-type" \
 
 echo
 echo "== 6. Env-var assertions (fail-fast, no docker/network call) =="
-# artifactory_upload.sh: with GPG_PRIVATE_KEY unset, must fail before docker
-# with a clear named error. All the CLI flags are present so we're
-# specifically testing the env-var check.
 TMP_INPUT="$(mktemp -d)"
 trap 'rm -rf "${TMP_INPUT}"' EXIT
 mkdir -p "${TMP_INPUT}/ai/rapids/cudf/26.08.0"
@@ -195,8 +176,6 @@ assert_fails_with_env "artifactory_upload: missing ARTIFACTORY_TOKEN" \
      --input '${TMP_INPUT}' --publication-type rc \
      --artifactory-url http://example --artifactory-repository test"
 
-# maven_central_publish.sh: no docker involved, but same env-var checks
-# should fail-fast before any curl.
 assert_fails_with_env "maven_central_publish: missing MAVEN_DEPLOY_TOKEN" \
   1 "MAVEN_DEPLOY_TOKEN must be set" \
   "export ARTIFACTORY_USERNAME=u ARTIFACTORY_TOKEN=t MAVEN_DEPLOY_USERNAME=u; unset MAVEN_DEPLOY_TOKEN; \
@@ -204,7 +183,6 @@ assert_fails_with_env "maven_central_publish: missing MAVEN_DEPLOY_TOKEN" \
      --group-id ai.rapids --artifact-id cudf --version 26.08.0 --rc-number 1 \
      --artifactory-url http://example --artifactory-repository test"
 
-# sonatype_snapshots_publish.sh: same fail-fast on missing env vars.
 assert_fails_with_env "sonatype_snapshots_publish: missing MAVEN_DEPLOY_USERNAME" \
   1 "MAVEN_DEPLOY_USERNAME must be set" \
   "export ARTIFACTORY_USERNAME=u ARTIFACTORY_TOKEN=t MAVEN_DEPLOY_TOKEN=t; unset MAVEN_DEPLOY_USERNAME; \
@@ -215,7 +193,6 @@ assert_fails_with_env "sonatype_snapshots_publish: missing MAVEN_DEPLOY_USERNAME
 
 echo
 echo "== 7. Format validation =="
-# maven_central_publish: --rc-number must be a positive integer.
 assert_fails_with_env "maven_central_publish: --rc-number 0 rejected" \
   1 "--rc-number must be a positive integer" \
   "export ARTIFACTORY_USERNAME=u ARTIFACTORY_TOKEN=t MAVEN_DEPLOY_USERNAME=u MAVEN_DEPLOY_TOKEN=t; \
@@ -223,7 +200,6 @@ assert_fails_with_env "maven_central_publish: --rc-number 0 rejected" \
      --group-id ai.rapids --artifact-id cudf --version 26.08.0 --rc-number 0 \
      --artifactory-url http://example --artifactory-repository test"
 
-# maven_central_publish: -SNAPSHOT version rejected on rc branch.
 assert_fails_with_env "maven_central_publish: -SNAPSHOT rejected" \
   1 "release-shaped version" \
   "export ARTIFACTORY_USERNAME=u ARTIFACTORY_TOKEN=t MAVEN_DEPLOY_USERNAME=u MAVEN_DEPLOY_TOKEN=t; \
@@ -231,7 +207,6 @@ assert_fails_with_env "maven_central_publish: -SNAPSHOT rejected" \
      --group-id ai.rapids --artifact-id cudf --version 26.08.0-SNAPSHOT --rc-number 1 \
      --artifactory-url http://example --artifactory-repository test"
 
-# sonatype_snapshots_publish: non-SNAPSHOT version rejected on nightly branch.
 assert_fails_with_env "sonatype_snapshots_publish: non-SNAPSHOT rejected" \
   1 "-SNAPSHOT version" \
   "export ARTIFACTORY_USERNAME=u ARTIFACTORY_TOKEN=t MAVEN_DEPLOY_USERNAME=u MAVEN_DEPLOY_TOKEN=t; \
@@ -240,7 +215,6 @@ assert_fails_with_env "sonatype_snapshots_publish: non-SNAPSHOT rejected" \
      --nightly-date 2026-07-27 \
      --artifactory-url http://example --artifactory-repository test"
 
-# sonatype_snapshots_publish: bad nightly-date format rejected.
 assert_fails_with_env "sonatype_snapshots_publish: bad --nightly-date rejected" \
   1 "YYYY-MM-DD" \
   "export ARTIFACTORY_USERNAME=u ARTIFACTORY_TOKEN=t MAVEN_DEPLOY_USERNAME=u MAVEN_DEPLOY_TOKEN=t; \
@@ -251,7 +225,6 @@ assert_fails_with_env "sonatype_snapshots_publish: bad --nightly-date rejected" 
 
 echo
 echo "== 8. generate_test_maven_repo argument validation =="
-# Reject non-empty --output-dir.
 NON_EMPTY_DIR="$(mktemp -d)"
 touch "${NON_EMPTY_DIR}/stray-file"
 assert_fails_with "generate_test_maven_repo: non-empty --output-dir rejected" \
@@ -260,22 +233,19 @@ assert_fails_with "generate_test_maven_repo: non-empty --output-dir rejected" \
     --output-dir "${NON_EMPTY_DIR}" --group-id io.github.myuser
 rm -rf "${NON_EMPTY_DIR}"
 
-# Reject invalid --group-id.
 assert_fails_with "generate_test_maven_repo: invalid --group-id rejected" \
   1 "--group-id must contain only" \
   "${BASE_DIR}/generate_test_maven_repo.sh" \
     --output-dir /tmp/gen-bad-groupid --group-id 'a b c'
 
-# --version flag exists and is advertised in --help output.
 if "${BASE_DIR}/generate_test_maven_repo.sh" --help 2>&1 | grep -qE -- '--version'; then
   pass "generate_test_maven_repo: --help advertises --version flag"
 else
   fail "generate_test_maven_repo: --help output does not mention --version"
 fi
 
-# test_maven_publish_local.sh no longer inlines the SNAPSHOT rewrite - it
-# now delegates to generate_test_maven_repo.sh --version 0.0.1-SNAPSHOT.
-# Guard against regression of the dedupe.
+# Guard against regression: SNAPSHOT rewrite should live inside
+# generate_test_maven_repo.sh --version, not be inlined here.
 if grep -qE 'hello-world-0\.0\.1-SNAPSHOT' "${BASE_DIR}/test_maven_publish_local.sh"; then
   fail "test_maven_publish_local.sh still contains inline SNAPSHOT rewrite (references hello-world-0.0.1-SNAPSHOT directly)"
 else
@@ -284,8 +254,6 @@ fi
 
 echo
 echo "== 9. --input handling in test_maven_publish_local =="
-# With --input pointing at a non-existent directory, we should fail-fast
-# with a clear error.
 assert_fails_with_env "test_maven_publish_local: --input to nonexistent dir rejected" \
   1 "does not exist" \
   "export ARTIFACTORY_USERNAME=u ARTIFACTORY_TOKEN=t MAVEN_DEPLOY_USERNAME=u MAVEN_DEPLOY_TOKEN=t; \
@@ -295,9 +263,8 @@ assert_fails_with_env "test_maven_publish_local: --input to nonexistent dir reje
      --artifactory-url http://example \
      --artifactory-repository test"
 
-# With --input supplied but GPG_PRIVATE_KEY missing, the wrapper must fail
-# with a clear "must be set" error (rather than silently generating a
-# throwaway key over a real payload).
+# --input supplied but no GPG_PRIVATE_KEY: must fail, NOT silently generate
+# a throwaway key over a real payload.
 REAL_INPUT="$(mktemp -d)"
 mkdir -p "${REAL_INPUT}/ai/rapids/cudf/26.08.0"
 touch "${REAL_INPUT}/ai/rapids/cudf/26.08.0/cudf-26.08.0.pom"
@@ -339,7 +306,6 @@ check_yaml_lacks() {
   fi
 }
 
-# maven-publish.yaml: workflow_call, no container: field, rc/nightly branches.
 check_yaml_contains "${YAML_FILE}" '^on:' \
   "maven-publish.yaml: has 'on:' block"
 check_yaml_contains "${YAML_FILE}" 'workflow_call:' \
@@ -357,19 +323,14 @@ check_yaml_contains "${YAML_FILE}" 'maven_central_publish.sh' \
 check_yaml_contains "${YAML_FILE}" 'sonatype_snapshots_publish.sh' \
   "maven-publish.yaml: invokes sonatype_snapshots_publish.sh"
 
-# Self-checkout must NOT fall back to raw github.ref - that would resolve to
-# the caller's ref (e.g. a cudf release tag) which doesn't exist in this
-# repo. The fix parses github.workflow_ref via a helper step; guard against
-# regressing back to the raw-fallback shape.
+# Guard against regressing back to the raw github.ref fallback.
 check_yaml_lacks "${YAML_FILE}" 'inputs\.shared-workflows-ref \|\| github\.ref' \
   "maven-publish.yaml: self-checkout no longer uses raw github.ref fallback"
 check_yaml_contains "${YAML_FILE}" 'github\.workflow_ref' \
   "maven-publish.yaml: self-checkout derives ref from github.workflow_ref"
 
-# The caller-facing publish-gate input must be the new positive-direction
-# name (stage-for-maven-central-publish), not the old opaque auto-drop.
-# Match against the input declaration line specifically (2 spaces of indent
-# under `inputs:` puts us at 6 spaces).
+# Publish-gate input must be the positive-direction name (6-space indent
+# under `inputs:`).
 check_yaml_contains "${YAML_FILE}" '^\s{6}stage-for-maven-central-publish:' \
   "maven-publish.yaml: declares 'stage-for-maven-central-publish' input"
 check_yaml_lacks "${YAML_FILE}" '^\s{6}auto-drop:' \
@@ -377,23 +338,18 @@ check_yaml_lacks "${YAML_FILE}" '^\s{6}auto-drop:' \
 
 echo
 echo "== 11. Repo-wide workflow invariants =="
-# Positive assertion: the smoke workflow is deleted and stays deleted. A
-# future PR that resurrects it trips this guard and forces a rethink of
-# the coverage-matrix trade-off documented in the plan.
+# Trip a future PR that resurrects the intentionally-deleted smoke workflow.
 if [[ -e "${SMOKE_YAML_FILE}" ]]; then
   fail "maven-publish-smoke-test.yaml exists at ${SMOKE_YAML_FILE} (was intentionally deleted)"
 else
   pass "maven-publish-smoke-test.yaml does not exist (per plan)"
 fi
 
-# test_maven_publish_local.sh is a developer entry point only. Failing here
-# preserves the local-dev-only invariant even if someone adds a new
-# workflow that tries to short-circuit through the wrapper.
+# test_maven_publish_local.sh is dev-only; block any workflow from calling it.
+# Comments mentioning it are fine, so strip them before checking.
 if grep -lE 'test_maven_publish_local\.sh' \
      "${WORKFLOWS_DIR}"/*.yaml 2>/dev/null \
    | while read -r wf; do
-       # Strip YAML comments and re-check to allow "don't call this" prose
-       # in comments without tripping the guard.
        if grep -vE '^\s*#' "${wf}" | grep -qE 'test_maven_publish_local\.sh'; then
          echo "${wf}"
        fi
@@ -403,9 +359,7 @@ else
   pass "no workflow file references test_maven_publish_local.sh"
 fi
 
-# ai.rapids is cudf-specific and must not be baked into a shared workflow
-# file. Comments explaining the constraint are fine; actionable lines are
-# not. Repo-wide since the smoke workflow (the previous scope) is gone.
+# ai.rapids is cudf-specific; must not be baked into any shared workflow.
 OFFENDING_AI_RAPIDS=""
 for wf in "${WORKFLOWS_DIR}"/*.yaml; do
   [[ -f ${wf} ]] || continue
