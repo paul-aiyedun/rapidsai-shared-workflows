@@ -57,9 +57,6 @@ ENVIRONMENT VARIABLES:
     ARTIFACTORY_TOKEN              Auth token for ARTIFACTORY_USERNAME (required).
     MAVEN_DEPLOY_USERNAME          Publisher Portal user token username (required).
     MAVEN_DEPLOY_TOKEN             Publisher Portal user token password (required).
-    POLL_INTERVAL_SEC              Poll interval while waiting for VALIDATED
-                                   (default: 15).
-    POLL_TIMEOUT_SEC               Overall poll timeout (default: 900).
 
 EOF
 }
@@ -170,7 +167,7 @@ echo "  auto-drop:     ${AUTO_DROP}"
 echo "  source:        ${STAGING_URL}"
 echo "  target portal: ${CENTRAL_PORTAL_URL}"
 
-# Downloads mirror the Maven-repo layout Central expects inside the zip.
+# Downloads mirror the Maven repository layout Central expects inside the zip.
 WORK_DIR="$(mktemp -d)"
 BUNDLE_DIR="${WORK_DIR}/bundle"
 BUNDLE_ARTIFACT_DIR="${BUNDLE_DIR}/${GROUP_PATH}/${ARTIFACT_ID}/${VERSION}"
