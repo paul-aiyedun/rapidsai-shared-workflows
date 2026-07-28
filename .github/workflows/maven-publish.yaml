@@ -81,13 +81,19 @@ on:
         required: false
         type: string
         default: 'linux-amd64-cpu4'
+      shared-workflows-repository:
+        description: |
+          Override for the shared-workflows repo to self-check out. Empty
+          (default) derives from github.workflow_ref so fork calls resolve
+          to the fork, not upstream.
+        required: false
+        type: string
+        default: ''
       shared-workflows-ref:
         description: |
-          Override for the ref of rapidsai/shared-workflows to self-check
-          out (so the job can reach the ci/maven-publish/*.sh scripts by
-          path). Empty (default) derives the ref from github.workflow_ref
-          so the checked-out scripts match the workflow file the caller
-          resolved to.
+          Override for the ref of the shared-workflows repo. Empty
+          (default) derives from github.workflow_ref so the checked-out
+          scripts match the workflow file the caller resolved to.
         required: false
         type: string
         default: ''
@@ -140,26 +146,34 @@ jobs:
         env:
           INPUTS_PUBLICATION_TYPE: ${{ inputs.publication-type }}
 
-      - name: Resolve shared-workflows ref
+      - name: Resolve shared-workflows repo and ref
         id: sw_ref
         # In workflow_call context github.ref is the caller's ref (which
         # doesn't exist here); github.workflow_ref
-        # (owner/repo/.github/workflows/foo.yaml@<ref>) is authoritative.
+        # (owner/repo/.github/workflows/foo.yaml@<ref>) is authoritative for
+        # both the repo name (fork-safe) and the ref.
         run: |
+          if [[ -n "${INPUT_REPO}" ]]; then
+            REPO="${INPUT_REPO}"
+          else
+            REPO="${GITHUB_WORKFLOW_REF%%/.github/*}"
+          fi
           if [[ -n "${INPUT_REF}" ]]; then
-            echo "ref=${INPUT_REF}" >> "${GITHUB_OUTPUT}"
+            REF="${INPUT_REF}"
           else
             REF="${GITHUB_WORKFLOW_REF##*@}"
-            echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           fi
+          echo "repo=${REPO}" >> "${GITHUB_OUTPUT}"
+          echo "ref=${REF}"   >> "${GITHUB_OUTPUT}"
         env:
+          INPUT_REPO: ${{ inputs.shared-workflows-repository }}
           INPUT_REF: ${{ inputs.shared-workflows-ref }}
           GITHUB_WORKFLOW_REF: ${{ github.workflow_ref }}
 
-      - name: Self-checkout rapidsai/shared-workflows
+      - name: Self-checkout shared-workflows
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          repository: rapidsai/shared-workflows
+          repository: ${{ steps.sw_ref.outputs.repo }}
           ref: ${{ steps.sw_ref.outputs.ref }}
           path: shared-workflows
           persist-credentials: false

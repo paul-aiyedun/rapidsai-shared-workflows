@@ -329,6 +329,12 @@ check_yaml_lacks "${YAML_FILE}" 'inputs\.shared-workflows-ref \|\| github\.ref' 
 check_yaml_contains "${YAML_FILE}" 'github\.workflow_ref' \
   "maven-publish.yaml: self-checkout derives ref from github.workflow_ref"
 
+# Self-checkout repo must be dynamic so fork calls resolve to the fork.
+check_yaml_lacks "${YAML_FILE}" 'repository: rapidsai/shared-workflows' \
+  "maven-publish.yaml: self-checkout repository is not hardcoded"
+check_yaml_contains "${YAML_FILE}" 'repository: \$\{\{ steps\.sw_ref\.outputs\.repo \}\}' \
+  "maven-publish.yaml: self-checkout repository comes from sw_ref step"
+
 # Publish-gate input must be the positive-direction name (6-space indent
 # under `inputs:`).
 check_yaml_contains "${YAML_FILE}" '^\s{6}stage-for-maven-central-publish:' \
