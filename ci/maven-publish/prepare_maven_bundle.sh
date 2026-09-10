@@ -24,7 +24,7 @@ Usage: prepare_maven_bundle.sh --input <path> --output <path>
 
 Copies a Maven repository directory into a clean output tree and GPG-signs
 every publishable file. The input tree is mounted read-only and is not changed.
-Both release and -SNAPSHOT versions are accepted; the destination check
+Both release and -SNAPSHOT versions are accepted. The destination check
 (Maven Central vs Sonatype snapshots) happens in the publish scripts.
 
 REQUIRED:

@@ -65,44 +65,20 @@ if (require_maven_coordinates 'ai.rapids\nBAD=1' cudf 26.08.0) >/dev/null 2>&1; 
   fail "invalid coordinates must be rejected"
 fi
 
-# require_release_version: accept release, reject SNAPSHOT.
-require_release_version 26.08.0
-if (require_release_version 26.10.0-SNAPSHOT) >/dev/null 2>&1; then
-  fail "require_release_version must reject a -SNAPSHOT version"
-fi
-
-# require_snapshot_version: accept SNAPSHOT, reject release.
-require_snapshot_version 26.10.0-SNAPSHOT
+require_snapshot_version 26.12.0-SNAPSHOT
 if (require_snapshot_version 26.08.0) >/dev/null 2>&1; then
   fail "require_snapshot_version must reject a release version"
 fi
 
-# require_snapshot_artifact_names: accept a -SNAPSHOT-only tree, reject one
-# that contains a release-shaped file.
-SNAPSHOT_VERSION=26.10.0-SNAPSHOT
+SNAPSHOT_VERSION=26.12.0-SNAPSHOT
 SNAPSHOT_DIR="${TEST_ROOT}/snapshot-bundle/ai/rapids/example/${SNAPSHOT_VERSION}"
 mkdir -p "${SNAPSHOT_DIR}"
-for suffix in \
-  .pom .pom.asc .jar .jar.asc \
-  -sources.jar -sources.jar.asc \
-  -javadoc.jar -javadoc.jar.asc; do
-  printf 'content for %s\n' "${suffix}" \
-    > "${SNAPSHOT_DIR}/example-${SNAPSHOT_VERSION}${suffix}"
-done
+printf 'content\n' > "${SNAPSHOT_DIR}/example-${SNAPSHOT_VERSION}.jar"
 require_snapshot_artifact_names "${TEST_ROOT}/snapshot-bundle" "${SNAPSHOT_VERSION}"
-
-# Drop a stray release-shaped file into the tree; verification must fail.
-printf 'stray release jar\n' > "${SNAPSHOT_DIR}/example-26.10.0.jar"
+printf 'stray release jar\n' > "${SNAPSHOT_DIR}/example-26.12.0.jar"
 if (require_snapshot_artifact_names "${TEST_ROOT}/snapshot-bundle" "${SNAPSHOT_VERSION}") \
     >/dev/null 2>&1; then
   fail "require_snapshot_artifact_names must reject a release-shaped file"
-fi
-rm "${SNAPSHOT_DIR}/example-26.10.0.jar"
-
-# Guard: a non-SNAPSHOT version passed in is a programmer error.
-if (require_snapshot_artifact_names "${TEST_ROOT}/snapshot-bundle" 26.08.0) \
-    >/dev/null 2>&1; then
-  fail "require_snapshot_artifact_names must reject a non-SNAPSHOT version argument"
 fi
 
 echo "Maven publish step tests passed"

@@ -37,8 +37,6 @@ ARTIFACT_ID=""
 VERSION=""
 read_pom_coordinates "${POM_FILE}" GROUP_ID ARTIFACT_ID VERSION
 require_maven_coordinates "${GROUP_ID}" "${ARTIFACT_ID}" "${VERSION}"
-# Both release and -SNAPSHOT versions are signed here; the release-vs-snapshot
-# destination check happens in the publish scripts.
 
 EXPECTED_ARTIFACT_DIR="${BUNDLE_DIR}/$(maven_group_path "${GROUP_ID}")/${ARTIFACT_ID}/${VERSION}"
 if [[ ${ARTIFACT_DIR} != "${EXPECTED_ARTIFACT_DIR}" ]]; then

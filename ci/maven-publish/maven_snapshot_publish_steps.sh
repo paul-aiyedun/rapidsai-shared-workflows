@@ -2,61 +2,51 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Sonatype snapshot upload helpers for maven_snapshot_publish.sh.
-#
-# Snapshots publish straight to https://central.sonatype.com/repository/maven-snapshots/
-# via HTTP PUT; there is no staging repository, no Portal validation, and no
-# human-gated publish step. This file relies on _sonatype_upload (Basic-auth
-# PUT with retry) from maven_central_publish_steps.sh, which the calling
-# script sources before this one.
+# Sonatype snapshot upload helpers for maven_snapshot_publish.sh. Requires
+# _sonatype_upload from maven_central_publish_steps.sh (sourced by the caller).
 
 # require_snapshot_artifact_names DIR VERSION
-# Fail if any file under DIR (recursively) does not contain "-SNAPSHOT" in its
-# name. This is the publish-side "-SNAPSHOT jar verification": it catches
-# release-shaped artifacts that would otherwise be uploaded to the snapshot
-# repository by mistake.
+# Fail if any file under DIR lacks "-SNAPSHOT" in its name.
 require_snapshot_artifact_names() {
-  local dir=$1
-  local version=$2
-  local file offender_count=0
+  local dir=$1 version=$2
   if [[ ${version} != *-SNAPSHOT ]]; then
     fatal "require_snapshot_artifact_names called with non-snapshot version '${version}'"
   fi
-  while IFS= read -r -d '' file; do
-    case "$(basename "${file}")" in
-      *-SNAPSHOT*|maven-metadata.xml*) ;;
-      *)
-        echo "Error: snapshot bundle contains non-SNAPSHOT file: ${file}" >&2
-        offender_count=$((offender_count + 1))
-        ;;
-    esac
-  done < <(find "${dir}" -type f -print0)
-  if (( offender_count > 0 )); then
-    fatal "found ${offender_count} file(s) missing '-SNAPSHOT' in their name under ${dir}"
+
+  local offenders
+  readarray -t offenders < <(
+    find "${dir}" -type f \
+      ! -name '*-SNAPSHOT*' \
+      ! -name 'maven-metadata.xml*'
+  )
+
+  if (( ${#offenders[@]} > 0 )); then
+    echo "Error: snapshot bundle contains non-SNAPSHOT files:" >&2
+    printf '  %s\n' "${offenders[@]}" >&2
+    fatal "found ${#offenders[@]} file(s) missing '-SNAPSHOT' in their name under ${dir}"
   fi
 }
 
 # snapshot_upload_file LOCAL_PATH REPOSITORY_PATH
-# PUT LOCAL_PATH to <SNAPSHOT_REPOSITORY_URL>/<REPOSITORY_PATH>.
+# PUT LOCAL_PATH to the snapshot repository at REPOSITORY_PATH.
 snapshot_upload_file() {
   local file_path=$1 repository_path=$2
-  local encoded_path
-  encoded_path=$(jq -rn --arg path "${repository_path}" \
-    '$path | split("/") | map(@uri) | join("/")')
-  _sonatype_upload "${file_path}" \
-    "${SNAPSHOT_REPOSITORY_URL}/${encoded_path}"
+  # Maven coordinates use only [A-Za-z0-9._/-], so no URL encoding is needed.
+  _sonatype_upload "${file_path}" "${SNAPSHOT_REPOSITORY_URL}/${repository_path}"
 }
 
 # upload_tree_to_snapshots ROOT
-# Walk ROOT (already a Maven-repository-layout tree) and PUT every file to
-# the Sonatype snapshot repository.
+# PUT every file under ROOT to the Sonatype snapshot repository.
 upload_tree_to_snapshots() {
-  local root=$1 file repository_path count=0
+  local root=$1
   echo "Uploading Maven repository files to the Sonatype snapshot repository"
-  while IFS= read -r -d '' file; do
-    repository_path=${file#"${root}/"}
-    snapshot_upload_file "${file}" "${repository_path}"
-    count=$((count + 1))
-  done < <(find "${root}" -type f -print0)
-  echo "  uploaded files: ${count}"
+
+  local files
+  readarray -t files < <(find "${root}" -type f)
+
+  local file
+  for file in "${files[@]}"; do
+    snapshot_upload_file "${file}" "${file#"${root}/"}"
+  done
+  echo "  uploaded files: ${#files[@]}"
 }

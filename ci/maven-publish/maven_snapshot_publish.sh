@@ -4,11 +4,6 @@
 
 # Publishes a signed Maven repository tree to the Sonatype snapshot
 # repository (https://central.sonatype.com/repository/maven-snapshots/).
-#
-# Snapshots do not use OSSRH staging or the Central Publisher Portal:
-# a successful HTTP PUT makes the SNAPSHOT immediately available and the
-# next publish overwrites the same coordinates. There is no staging, no
-# validation poll, no human-gated publish, and no auto-drop.
 
 set -euo pipefail
 
@@ -48,7 +43,7 @@ REQUIRED:
     -i, --input                    Signed Maven repository directory.
     -g, --group-id                 Maven groupId, e.g. ai.rapids.
     -a, --artifact-id              Maven artifactId, e.g. cudf.
-    -v, --version                  Snapshot version, e.g. 26.10.0-SNAPSHOT.
+    -v, --version                  Snapshot version, e.g. 26.12.0-SNAPSHOT.
     -o, --output-bundle            Path for the retained snapshot ZIP.
 
 OPTIONS:
@@ -144,12 +139,9 @@ BUNDLE_ARTIFACT_DIR="${BUNDLE_DIR}/$(maven_group_path "${GROUP_ID}")/${ARTIFACT_
 mkdir -p "${BUNDLE_DIR}"
 
 copy_bundle "${INPUT_DIR}" "${BUNDLE_DIR}"
-# Publish-side -SNAPSHOT verification: every file's name must include
-# "-SNAPSHOT" (or be Maven metadata). A release-shaped file here indicates
-# the build produced release artifacts on a non-release run.
+# Reject if any release shaped file is present in the snapshot bundle.
 require_snapshot_artifact_names "${BUNDLE_DIR}" "${VERSION}"
-# Structural check: POM, primary/sources/javadoc jars and their signatures
-# must all exist for the -SNAPSHOT version.
+# Require the POM, primary/sources/javadoc jars, and their signatures.
 require_bundle_contents "${BUNDLE_ARTIFACT_DIR}"
 generate_bundle_checksums "${BUNDLE_ARTIFACT_DIR}"
 

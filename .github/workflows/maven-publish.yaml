@@ -26,7 +26,7 @@ on:
           Publisher Portal for a human to release via the Portal UI
           (https://central.sonatype.com). When false (default), validate then
           drop the bundle. Only applies to the Maven Central path (release
-          builds); ignored on the snapshot path.
+          builds). Ignored on the snapshot path.
         required: false
         type: boolean
         default: false
@@ -70,10 +70,13 @@ jobs:
 
       - name: Install gha-tools
         run: |
-          # rapids-is-release-build lives in rapidsai/gha-tools. Add it to PATH
-          # so the release check below (and any downstream steps) can find it.
-          git clone --depth 1 https://github.com/rapidsai/gha-tools /tmp/gha-tools
-          echo "/tmp/gha-tools/tools" >> "${GITHUB_PATH}"
+          # rapids-is-release-build lives in rapidsai/gha-tools. Fetch the
+          # release tarball and add it to PATH so the release check below
+          # (and any downstream steps) can find it.
+          mkdir -p /tmp/gha-tools
+          wget -qO- https://github.com/rapidsai/gha-tools/releases/latest/download/tools.tar.gz \
+            | tar -xz -C /tmp/gha-tools
+          echo "/tmp/gha-tools" >> "${GITHUB_PATH}"
 
       - name: Determine publish destination
         id: destination

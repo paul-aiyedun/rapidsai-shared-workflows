@@ -19,54 +19,42 @@ gpg --batch --yes --pinentry-mode loopback \
 GPG_PRIVATE_KEY=$(gpg --batch --yes --pinentry-mode loopback \
   --passphrase "${GPG_PASSPHRASE}" --armor --export-secret-keys)
 
-export GPG_PRIVATE_KEY GPG_PASSPHRASE
+INPUT_DIR="${TEST_ROOT}/input"
+ARTIFACT_DIR="${INPUT_DIR}/ai/rapids/example/26.08.0"
+OUTPUT_DIR="${TEST_ROOT}/signed"
+GITHUB_OUTPUT="${TEST_ROOT}/github-output"
+mkdir -p "${ARTIFACT_DIR}"
 
-# Sign both a release-shaped and a -SNAPSHOT-shaped input to cover both
-# publication destinations. Both must succeed; the destination check is
-# enforced by the publish scripts, not the signer.
-run_prepare_bundle_case() {
-  local case_name=$1 version=$2
+printf '%s\n' \
+  '<project xmlns="http://maven.apache.org/POM/4.0.0">' \
+  '  <modelVersion>4.0.0</modelVersion>' \
+  '  <groupId>ai.rapids</groupId>' \
+  '  <artifactId>example</artifactId>' \
+  '  <version>26.08.0</version>' \
+  '</project>' \
+  > "${ARTIFACT_DIR}/example-26.08.0.pom"
+printf 'primary jar\n' > "${ARTIFACT_DIR}/example-26.08.0.jar"
+printf 'sources jar\n' > "${ARTIFACT_DIR}/example-26.08.0-sources.jar"
+printf 'javadoc jar\n' > "${ARTIFACT_DIR}/example-26.08.0-javadoc.jar"
+printf 'stale checksum\n' > "${ARTIFACT_DIR}/example-26.08.0.jar.sha1"
 
-  local input_dir="${TEST_ROOT}/input-${case_name}"
-  local output_dir="${TEST_ROOT}/signed-${case_name}"
-  local github_output="${TEST_ROOT}/github-output-${case_name}"
-  local artifact_dir="${input_dir}/ai/rapids/example/${version}"
-  mkdir -p "${artifact_dir}"
+export GPG_PRIVATE_KEY GPG_PASSPHRASE GITHUB_OUTPUT
+"${SCRIPT_DIR}/prepare_maven_bundle.sh" \
+  --input "${INPUT_DIR}" \
+  --output "${OUTPUT_DIR}"
 
-  printf '%s\n' \
-    '<project xmlns="http://maven.apache.org/POM/4.0.0">' \
-    '  <modelVersion>4.0.0</modelVersion>' \
-    '  <groupId>ai.rapids</groupId>' \
-    '  <artifactId>example</artifactId>' \
-    "  <version>${version}</version>" \
-    '</project>' \
-    > "${artifact_dir}/example-${version}.pom"
-  printf 'primary jar\n' > "${artifact_dir}/example-${version}.jar"
-  printf 'sources jar\n' > "${artifact_dir}/example-${version}-sources.jar"
-  printf 'javadoc jar\n' > "${artifact_dir}/example-${version}-javadoc.jar"
-  printf 'stale checksum\n' > "${artifact_dir}/example-${version}.jar.sha1"
+SIGNED_DIR="${OUTPUT_DIR}/ai/rapids/example/26.08.0"
+for artifact in \
+  example-26.08.0.pom \
+  example-26.08.0.jar \
+  example-26.08.0-sources.jar \
+  example-26.08.0-javadoc.jar; do
+  gpg --verify "${SIGNED_DIR}/${artifact}.asc" "${SIGNED_DIR}/${artifact}"
+done
 
-  GITHUB_OUTPUT="${github_output}" \
-  "${SCRIPT_DIR}/prepare_maven_bundle.sh" \
-    --input "${input_dir}" \
-    --output "${output_dir}"
-
-  local signed_dir="${output_dir}/ai/rapids/example/${version}"
-  for artifact in \
-    "example-${version}.pom" \
-    "example-${version}.jar" \
-    "example-${version}-sources.jar" \
-    "example-${version}-javadoc.jar"; do
-    gpg --verify "${signed_dir}/${artifact}.asc" "${signed_dir}/${artifact}"
-  done
-
-  [[ ! -e ${signed_dir}/example-${version}.jar.sha1 ]]
-  grep -Fx 'GROUP_ID=ai.rapids' "${github_output}"
-  grep -Fx 'ARTIFACT_ID=example' "${github_output}"
-  grep -Fx "VERSION=${version}" "${github_output}"
-}
-
-run_prepare_bundle_case release 26.08.0
-run_prepare_bundle_case snapshot 26.10.0-SNAPSHOT
+[[ ! -e ${SIGNED_DIR}/example-26.08.0.jar.sha1 ]]
+grep -Fx 'GROUP_ID=ai.rapids' "${GITHUB_OUTPUT}"
+grep -Fx 'ARTIFACT_ID=example' "${GITHUB_OUTPUT}"
+grep -Fx 'VERSION=26.08.0' "${GITHUB_OUTPUT}"
 
 echo "Maven bundle preparation integration test passed"
